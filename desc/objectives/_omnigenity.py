@@ -1492,3 +1492,430 @@ class OmnigenityHarmonics(_Objective):
         )
         B_ea_mn_non_zero = B_ea_mn[modes_index_xm_non_zero]
         return B_ea_mn_non_zero
+
+
+class Omnigenity_pwO(_Objective):
+    """Pointwise pwO omnigenity objective in LCForm coordinates.
+
+    This objective evaluates the equilibrium magnetic field strength
+    on the LCForm mapped Boozer coordinates and penalizes alpha variation
+    at fixed eta.
+
+    The residual is
+
+        B_eq(eta, alpha) - <B_eq(eta, alpha)>_alpha
+
+    where the alpha-average is computed only inside the active pwO domain.
+
+    Parameters
+    ----------
+    eq : Equilibrium
+        DESC equilibrium.
+    field : OmnigenousFieldLCForm
+        LCForm omnigenous / pwO field.
+    expanded : bool
+        If False, use only the central squeezed domain:
+
+            Delta_eta <= eta <= 2*pi - Delta_eta
+
+        If True, also include the lower and upper expanded caps:
+
+            eta_crit <= eta <= Delta_eta,
+            2*pi - Delta_eta <= eta <= 2*pi - eta_crit,
+            with
+            |alpha - pi| <= Delta_theta(eta).
+    """
+
+    _coordinates = "rtz"
+    _units = "(T)"
+    _print_value_fmt = "O-omnigenity error: "
+
+    _static_attrs = _Objective._static_attrs + [
+        "_eq_data_keys",
+        "_eq_fixed",
+        "_field_data_keys",
+        "_field_fixed",
+        "_helicity",
+        "M_booz",
+        "N_booz",
+        "expanded",
+        "S_function",
+        "D_function",
+    ]
+
+    def __init__(
+        self,
+        eq,
+        field,
+        target=None,
+        bounds=None,
+        weight=1,
+        normalize=True,
+        normalize_target=True,
+        loss_function=None,
+        deriv_mode="auto",
+        eq_grid=None,
+        field_grid=None,
+        M_booz=None,
+        N_booz=None,
+        eta_weight=1,
+        expanded=False,
+        eq_fixed=False,
+        field_fixed=False,
+        name="Omnigenity_pwO",
+        jac_chunk_size=None,
+    ):
+        if target is None and bounds is None:
+            target = 0
+
+        self._eq = eq
+        self._field = field
+
+        self._eq_grid = eq_grid
+        self._field_grid = field_grid
+
+        self.M_booz = M_booz
+        self.N_booz = N_booz
+
+        self.eta_weight = eta_weight
+        self.expanded = expanded
+
+        self.helicity = field.helicity
+        self._helicity = field.helicity
+
+        self.S_function = getattr(self._field, "_S_func")
+        self.D_function = getattr(self._field, "_D_func")
+
+        self._eq_fixed = eq_fixed
+        self._field_fixed = field_fixed
+
+        if not eq_fixed and not field_fixed:
+            things = [eq, field]
+        elif eq_fixed and not field_fixed:
+            things = [field]
+        elif field_fixed and not eq_fixed:
+            things = [eq]
+        else:
+            raise ValueError("Cannot fix both the eq and field.")
+
+        super().__init__(
+            things=things,
+            target=target,
+            bounds=bounds,
+            weight=weight,
+            normalize=normalize,
+            normalize_target=normalize_target,
+            loss_function=loss_function,
+            deriv_mode=deriv_mode,
+            name=name,
+            jac_chunk_size=jac_chunk_size,
+        )
+
+    def build(self, use_jit=True, verbose=1):
+        """Build objective."""
+
+        if self._eq_fixed:
+            eq = self._eq
+            field = self.things[0]
+        elif self._field_fixed:
+            eq = self.things[0]
+            field = self._field
+        else:
+            eq = self.things[0]
+            field = self.things[1]
+
+        M_booz = self.M_booz or 2 * eq.M
+        N_booz = self.N_booz or 2 * eq.N
+
+        # ------------------------------------------------------------
+        # Grids
+        # ------------------------------------------------------------
+        if self._field_grid is None:
+            field_grid = LinearGrid(
+                rho=1.0,
+                M=2 * field.M_B,
+                N=2 * field.N_x,
+                NFP=field.NFP,
+                sym=False,
+            )
+        else:
+            field_grid = self._field_grid
+
+        if self._eq_grid is None:
+            rho = field_grid.nodes[field_grid.unique_rho_idx, 0]
+            eq_grid = LinearGrid(
+                rho=rho,
+                M=2 * M_booz,
+                N=2 * N_booz,
+                NFP=eq.NFP,
+                sym=False,
+            )
+        else:
+            eq_grid = self._eq_grid
+
+        errorif(eq_grid.sym, msg="eq_grid must have sym=False.")
+        errorif(field_grid.sym, msg="field_grid must have sym=False.")
+
+        errorif(
+            eq_grid.NFP != field_grid.NFP,
+            msg="eq_grid and field_grid must have the same NFP.",
+        )
+
+        errorif(
+            field_grid.num_rho != 1,
+            msg="Omnigenity_pwO currently assumes a single rho surface.",
+        )
+
+        # equilibrium data keys
+        self._eq_data_keys = [
+            "|B|_mn_B",
+            "iota",
+        ]
+
+        # field data keys
+        self._field_data_keys = [
+            "theta_B_LCForm",
+            "zeta_B_LCForm",
+            "eta_LCForm",
+            "eta_crit_LCForm",
+            "Delta_eta_LCForm",
+            "Delta_theta_LCForm",
+        ]
+
+        if verbose > 0:
+            print("Precomputing transforms")
+
+        timer = Timer()
+        timer.start("Precomputing transforms")
+
+        eq_profiles = get_profiles(
+            self._eq_data_keys,
+            obj=eq,
+            grid=eq_grid,
+        )
+
+        eq_transforms = get_transforms(
+            self._eq_data_keys,
+            obj=eq,
+            grid=eq_grid,
+            M_booz=M_booz,
+            N_booz=N_booz,
+        )
+
+        field_transforms = get_transforms(
+            self._field_data_keys,
+            obj=field,
+            grid=field_grid,
+        )
+
+        self._constants = {
+            # standard constant keys 
+            "profiles": {},
+            "transforms": field_transforms,
+
+            # IS THIS NECESSARY?
+            # custom for this objective
+            "eq_profiles": eq_profiles,
+            "eq_transforms": eq_transforms,
+            "field_transforms": field_transforms,
+            "helicity": self.helicity,
+        }
+
+        if self._eq_fixed:
+            eq_data = compute_fun(
+                "desc.equilibrium.equilibrium.Equilibrium",
+                self._eq_data_keys,
+                params=self._eq.params_dict,
+                transforms=self._constants["eq_transforms"],
+                profiles=self._constants["eq_profiles"],
+            )
+            self._constants["eq_data"] = eq_data
+
+        # DISCLAIMER: THE RESIDUAL HAVE THE SIZE OF THE FULL GRID! 
+        # Points outside the active pwO domain are not removed;
+        # they are simply multiplied by zero using the mask.
+        self._dim_f = field_grid.num_nodes
+
+        timer.stop("Precomputing transforms")
+
+        if verbose > 1:
+            timer.disp("Precomputing transforms")
+
+        if self._normalize:
+            scales = compute_scaling_factors(eq)
+            self._normalization = scales["B"]
+
+        super().build(use_jit=use_jit, verbose=verbose)
+
+    def compute(self, params_1=None, params_2=None, constants=None):
+        """Compute the pwO / expanded-pwO residual."""
+
+        if constants is None:
+            constants = self.constants
+
+        if self._eq_fixed:
+            field_params = params_1
+        elif self._field_fixed:
+            eq_params = params_1
+        else:
+            eq_params = params_1
+            field_params = params_2
+
+        eq_grid = constants["eq_transforms"]["grid"]
+        field_grid = constants["field_transforms"]["grid"]
+
+        # compute eq data
+        if self._eq_fixed:
+            eq_data = constants["eq_data"]
+        else:
+            eq_data = compute_fun(
+                "desc.equilibrium.equilibrium.Equilibrium",
+                self._eq_data_keys,
+                params=eq_params,
+                transforms=constants["eq_transforms"],
+                profiles=constants["eq_profiles"],
+            )
+
+        # LCForm mapping depends on the rotational transform.
+        iota = eq_data["iota"][eq_grid.unique_rho_idx]
+
+        # compute field data
+        if self._field_fixed:
+            field_params = self._field.params_dict
+
+        field_data = compute_fun(
+            "desc.magnetic_fields._core.OmnigenousFieldLCForm",
+            self._field_data_keys,
+            params=field_params,
+            transforms=constants["field_transforms"],
+            profiles={},
+            helicity=constants["helicity"],
+            iota=iota,
+            S_func=self.S_function,
+            D_func=self.D_function,
+        )
+
+        theta_B = field_data["theta_B_LCForm"]
+        zeta_B = field_data["zeta_B_LCForm"]
+
+        theta_B = field_grid.meshgrid_reshape(theta_B, "rtz").reshape(
+            (field_grid.num_rho, -1)
+        )
+
+        zeta_B = field_grid.meshgrid_reshape(zeta_B, "rtz").reshape(
+            (field_grid.num_rho, -1)
+        )
+
+        def _compute_B_eta_alpha(theta_B, zeta_B, B_mn):
+            nodes = jnp.vstack(
+                (
+                    jnp.zeros_like(theta_B),
+                    theta_B,
+                    zeta_B,
+                )
+            ).T
+
+            B_eta_alpha = jnp.matmul(
+                constants["eq_transforms"]["B"].basis.evaluate(nodes),
+                B_mn,
+            )
+
+            return B_eta_alpha
+
+        B_mn = eq_data["|B|_mn_B"].reshape((eq_grid.num_rho, -1))       
+
+        B_eta_alpha = vmap(_compute_B_eta_alpha)(theta_B, zeta_B, B_mn)
+
+        B_eta_alpha = B_eta_alpha.reshape(
+            (
+                field_grid.num_rho,
+                field_grid.num_theta,
+                field_grid.num_zeta,
+            )
+        )
+
+        # Single surface
+        B2 = B_eta_alpha[-1]
+
+        # Build active mask. Will change if expanded or not
+        mask = self._pwo_mask(field_data, field_grid)
+        mask = mask.astype(B2.dtype)
+
+        # Residual is the average over alpha at fixed eta, but only inside mask
+        #
+        # For each eta_j:
+        #   B_avg(eta_j) =
+        #       sum_alpha B(alpha, eta_j) * mask(alpha, eta_j) /
+        #       sum_alpha mask(alpha, eta_j)
+
+        numerator = jnp.sum(B2 * mask, axis=0, keepdims=True)
+        denominator = jnp.sum(mask, axis=0, keepdims=True)
+
+        denominator = jnp.maximum(denominator, 1.0) # avoid division by zero
+
+        B_avg_alpha = numerator / denominator
+
+        # residual 
+        residual = (B2 - B_avg_alpha) * mask
+
+        return residual.flatten(order="F")
+
+    def _pwo_mask(self, field_data, field_grid):
+        """Build the active pwO domain mask.
+
+        The output has shape (nalpha, neta), with 1's in points inside the domain and 0 otherwise. 
+
+        There are two possible domains: 
+            - not expanded / central: Delta_eta <= eta <= 2*pi - Delta_eta
+            - expanded / lower + central + upper: eta_crit <= eta <= Delta_eta
+                                                  2*pi - Delta_eta <= eta <= 2*pi - eta_crit
+                                                  |alpha - pi| <= Delta_theta(eta)
+
+        """
+
+        nalpha = field_grid.num_theta
+        neta = field_grid.num_zeta
+
+        # eta grid 
+        eta = field_data["eta_LCForm"].reshape((nalpha, neta), order="F")
+        eta = jnp.mod(eta, 2*jnp.pi) # eta has to be between 0 and 2pi
+
+        # alpha grid
+        alpha = field_grid.nodes[:, 1].reshape((nalpha, neta), order="F")
+        alpha = jnp.mod(alpha, 2 * jnp.pi)
+
+        # Scalar quantities for the limits of the domains. 
+        Delta_eta = jnp.ravel(field_data["Delta_eta_LCForm"])[0]
+        eta_crit = jnp.ravel(field_data["eta_crit_LCForm"])[0]
+
+        # a) central squeezed domain
+        mask_center = (eta >= Delta_eta) & (eta <= 2 * jnp.pi - Delta_eta)
+
+        # If we do not want the expanded version, we stop here!
+        if not self.expanded:
+            return mask_center
+
+        # Calculate Delta_theta for the other two domains
+        Delta_theta = field_data["Delta_theta_LCForm"].reshape(
+            (nalpha, neta),
+            order="F",
+        )
+
+        # Distance of theta from pi
+        dist_alpha_pi = jnp.abs(alpha - jnp.pi)
+        mask_alpha = dist_alpha_pi <= Delta_theta
+
+        # b) Lower domain
+        mask_lower = (eta >= eta_crit) & (eta <= Delta_eta)
+
+        # c) Upper domain
+        mask_upper = (eta >= 2*jnp.pi - Delta_eta) & (
+            eta <= 2*jnp.pi - eta_crit
+        )
+
+        # Full mask
+        mask_extended = mask_alpha & (mask_lower | mask_upper)
+
+        mask_total = mask_center | mask_extended
+
+        return mask_total

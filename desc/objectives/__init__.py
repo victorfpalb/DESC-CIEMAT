@@ -50,6 +50,7 @@ from ._omnigenity import (
     Isodynamicity,
     Omnigenity,
     OmnigenityHarmonics,
+    Omnigenity_pwO, 
     QuasisymmetryBoozer,
     QuasisymmetryTripleProduct,
     QuasisymmetryTwoTerm,
