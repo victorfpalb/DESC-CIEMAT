@@ -3837,3 +3837,37 @@ def _L_grad_B(params, transforms, profiles, data, **kwargs):
 def _K_vc(params, transforms, profiles, data, **kwargs):
     data["K_vc"] = cross(data["n_rho"], data["B"]) / mu_0
     return data
+
+@register_compute_fun(
+    name="dBmin_ds",
+    label="d|B|_{min}/ds",
+    units="~",
+    units_long="meters",
+    description="Derivative of magnetic field minima w.r.t the radial coordinate",
+    dim=1,
+    params=[],
+    transforms={"grid": []},
+    profiles=[],
+    coordinates="rtz",
+    data=["|B|"],
+)
+def _dB_min_drho(params, transforms, profiles, data, **kwargs):
+    
+    nsurfs = transforms["grid"].num_rho
+    
+    rho_min = jnp.min(transforms["grid"].nodes[:,0])
+    rho_max = jnp.max(transforms["grid"].nodes[:,0])
+    
+    rho = jnp.linspace(rho_min, rho_max, nsurfs)
+    
+    modB = transforms["grid"].meshgrid_reshape(data["|B|"], order='rtz').flatten()
+
+    minB_rho = jnp.min(jnp.stack(jnp.split(modB, nsurfs)), axis=1).flatten()
+    
+    # Fixed formula
+    dBmin_ds = jnp.gradient(minB_rho, rho) / (2*rho)
+    
+    dBmin_ds = transforms["grid"].expand(dBmin_ds, surface_label='rho') 
+    # Hay que expandir esto para que cuadre con las dimensiones de la función de coste! 
+    data["dBmin_ds"] = dBmin_ds
+    return data
