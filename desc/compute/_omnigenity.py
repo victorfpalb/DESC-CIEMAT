@@ -15,6 +15,7 @@ from interpax import interp1d
 
 from desc.backend import jnp, sign, vmap, switch, cond, gammaln, root_scalar
 from jax.lax import dynamic_slice
+from desc.backend import jax
 
 from ..utils import cross, dot, safediv
 from .data_index import register_compute_fun
@@ -1452,11 +1453,14 @@ def _eta_crit_LCForm(params, transforms, profiles, data, **kwargs):
 
 
 @register_compute_fun(
-    name="Delta_eta_LCForm",
-    label="\\Delta \\eta",
-    units="rad",
-    units_long="radians",
-    description="Ideal Delta_eta where the two LCForm contours intersect at theta=0, 2pi.",
+    name="pwO_mask",
+    label="M_{\\mathrm{pwO}}",
+    units="~",
+    units_long="None",
+    description=(
+        "Valid Omnigenous-pwO LCForm mask in a uniform (eta, alpha) grid, defined by "
+        "zeta_eff(eta, alpha) - zeta_eff(2pi - eta, alpha) + 2pi >= 0."
+    ),
     dim=1,
     params=["S_list", "D_list"],
     transforms={"grid": []},
@@ -1464,15 +1468,14 @@ def _eta_crit_LCForm(params, transforms, profiles, data, **kwargs):
     coordinates="rtz",
     data=["eta_crit_LCForm"],
     parameterization="desc.magnetic_fields._core.OmnigenousFieldLCForm",
-    helicity="tuple: Type of quasisymmetry, (M,N). Default (1,0)",
+    helicity="tuple: Type of omnigenity, (M,N). Default (1,0)",
     iota="float: Value of rotational transform on the Omnigenous surface. Default 1.0",
     S_func="function: Function to compute S(eta,theta) given S_list",
     D_func="function: Function to compute D(eta) given D_list",
-    root_tol="float: Root solve tolerance. Default 1e-8",
-    root_maxiter="int: Maximum root solve iterations. Default 30",
-    root_maxiter_ls="int: Maximum line-search iterations. Default 5",
+    neta_pwO_mask="int: Number of eta points for the pwO mask. Default 64",
+    nalpha_pwO_mask="int: Number of alpha points for the pwO mask. Default 128",
 )
-def _Delta_eta_LCForm(params, transforms, profiles, data, **kwargs):
+def _pwO_mask_LCForm(params, transforms, profiles, data, **kwargs):
     M, N = kwargs.get("helicity", (1, 0))
     iota = kwargs.get("iota", jnp.ones(transforms["grid"].num_rho))
 
@@ -1483,176 +1486,80 @@ def _Delta_eta_LCForm(params, transforms, profiles, data, **kwargs):
     D_func = kwargs.get("D_func", None)
 
     if S_func is None or D_func is None:
-        raise ValueError("S_func and D_func must be provided for LCForm Delta_eta")
+        raise ValueError("S_func and D_func must be provided for LCForm pwO_mask")
 
-    eta_crit = data["eta_crit_LCForm"]
-    iota_eff = _iota_eff_LCForm(M, N, iota, transforms["grid"].NFP)
+    neta = int(kwargs.get("neta_pwO_mask", 64))
+    nalpha = int(kwargs.get("nalpha_pwO_mask", 128))
 
-    # Ensure that we are inside the domain eta_cr < eta < pi. This should help the Newton's method to find the zeros of the function. 
-    eps = 1e-6
-    lower = jnp.clip(eta_crit + eps, eps, jnp.pi - eps)
-    upper = jnp.pi - eps
-    x0 = 0.5 * (lower + upper) # Intermediate point of the domain
+    eta_crit = jnp.ravel(jnp.asarray(data["eta_crit_LCForm"]))[0]
 
-    def _fixup(x, *args):
-        return jnp.clip(x, lower, upper) # ensure the correc domain
-
-    def _residual(Delta_eta, iota_eff, S_list, D_list):
-        zeta_low = _zeta_LCForm_raw(
-            Delta_eta,
-            0.0,
-            iota_eff,
-            S_list,
-            D_list,
-            S_func,
-            D_func,
-        )
-
-        zeta_up = _zeta_LCForm_raw(
-            2 * jnp.pi - Delta_eta,
-            0.0,
-            iota_eff,
-            S_list,
-            D_list,
-            S_func,
-            D_func,
-        )
-
-        return zeta_low - zeta_up + 2 * jnp.pi # Function that we want to minimize
-
-    Delta_eta = root_scalar(
-        _residual,
-        x0,
-        args=(iota_eff, S_list, D_list),
-        tol=kwargs.get("root_tol", 1e-8),
-        maxiter=kwargs.get("root_maxiter", 30),
-        maxiter_ls=kwargs.get("root_maxiter_ls", 5),
-        fixup=_fixup,
+    iota_eff = _iota_eff_LCForm(
+        M,
+        N,
+        iota,
+        transforms["grid"].NFP,
     )
+    iota_eff = jnp.ravel(iota_eff)[0]
 
-    data["Delta_eta_LCForm"] = Delta_eta
-    return data
-
-
-@register_compute_fun(
-    name="Delta_theta_LCForm",
-    label="\\Delta \\theta",
-    units="rad",
-    units_long="radians",
-    description="Delta_theta filling angle for the LCForm Bmax regions.",
-    dim=1,
-    params=["S_list", "D_list"],
-    transforms={"grid": []},
-    profiles=[],
-    coordinates="rtz",
-    data=["eta_LCForm", "eta_crit_LCForm", "Delta_eta_LCForm"],
-    parameterization="desc.magnetic_fields._core.OmnigenousFieldLCForm",
-    helicity="tuple: Type of quasisymmetry, (M,N). Default (1,0)",
-    iota="float: Value of rotational transform on the Omnigenous surface. Default 1.0",
-    S_func="function: Function to compute S(eta,theta) given S_list",
-    D_func="function: Function to compute D(eta) given D_list",
-    root_tol="float: Root solve tolerance. Default 1e-8",
-    root_maxiter="int: Maximum root solve iterations. Default 30",
-    root_maxiter_ls="int: Maximum line-search iterations. Default 5",
-)
-def _Delta_theta_LCForm(params, transforms, profiles, data, **kwargs):
-    M, N = kwargs.get("helicity", (1, 0))
-    iota = kwargs.get("iota", jnp.ones(transforms["grid"].num_rho))
-
-    S_list = jnp.asarray(params["S_list"])
-    D_list = jnp.asarray(params["D_list"])
-
-    S_func = kwargs.get("S_func", None)
-    D_func = kwargs.get("D_func", None)
-
-    if S_func is None or D_func is None:
-        raise ValueError("S_func and D_func must be provided for LCForm Delta_theta")
-
-    grid = transforms["grid"]
-
-    eta = data["eta_LCForm"]
-    eta_crit = data["eta_crit_LCForm"]
-    Delta_eta = data["Delta_eta_LCForm"]
-
-    iota_eff = _iota_eff_LCForm(M, N, iota, grid.NFP)
-    # Small margin to avoid evaluating the root solve exactly at the boundaries
-    eps = 1e-6
-
-    eta_1d = grid.nodes[grid.unique_zeta_idx, 2] * grid.NFP # grid of eta in which we want to evaluate Delta_theta
-
-    eta_lower_1d = jnp.where(eta_1d <= jnp.pi, eta_1d, 2 * jnp.pi - eta_1d) # Full domain of eta (eta = zeta_B * NFP)
-
-    # We will solve for Delta_theta in the lower domain (eta_cr < eta < Delta_theta), 
-    # and expand it at the end to the upper domain (2*pi - Delta_eta < eta < 2*pi - eta_cr) by symmetry.
-
-    # This is for numerical reasons. 
-    eta_lower_1d_safe = jnp.clip(
-        eta_lower_1d,
-        eta_crit + eps,
-        Delta_eta - eps,
+    eta_min = jnp.clip(
+        eta_crit,
+        0,
+        jnp.pi,
     )
+    eta_max = 2.0 * jnp.pi - eta_min
 
-    def _solve_one(eta_i):
-
-        x0 = 3*jnp.pi/4 # Initial guess: Delta_theta = 0.75 * pi
-
-        def _fixup(x, *args):
-            return jnp.clip(x, eps, jnp.pi - eps)
-
-        def _residual(Delta_theta, eta_i, iota_eff, S_list, D_list):
-            theta = jnp.pi + Delta_theta
-
-            zeta_low = _zeta_LCForm_raw(
-                eta_i,
-                theta,
-                iota_eff,
-                S_list,
-                D_list,
-                S_func,
-                D_func,
-            )
-
-            zeta_up = _zeta_LCForm_raw(
-                2 * jnp.pi - eta_i,
-                theta,
-                iota_eff,
-                S_list,
-                D_list,
-                S_func,
-                D_func,
-            )
-
-            return zeta_low - zeta_up + 2 * jnp.pi
-
-        return root_scalar(
-            _residual,
-            x0,
-            args=(eta_i, iota_eff, S_list, D_list),
-            tol=kwargs.get("root_tol", 1e-8),
-            maxiter=kwargs.get("root_maxiter", 30),
-            maxiter_ls=kwargs.get("root_maxiter_ls", 5),
-            fixup=_fixup,
-        )
-
-    # One root solve per unique eta value, not per full grid node.
-    Delta_theta_1d = vmap(_solve_one)(eta_lower_1d_safe)
-
-    # We expand now Delta_theta to the full grid.
-    eta_idx = jnp.searchsorted(eta_1d, eta, side="left")
-    eta_idx = jnp.clip(eta_idx, 0, eta_1d.size - 1)
-
-    Delta_theta = Delta_theta_1d[eta_idx]
-
-    # Delta_theta is only meaninfull in the lower and upper domain of eta (outside Delta_eta < eta < 2pi - Delta_eta). Therefore, 
-    # we can apply a mask in which only the points outside the domain are non-zero.
-
-    eta_lower = jnp.where(eta <= jnp.pi, eta, 2*jnp.pi - eta) # This eta is from 0 to pi
-    cap_eta_mask = (eta_lower > eta_crit) & (eta_lower < Delta_eta)
-
-    data["Delta_theta_LCForm"] = jnp.where(
-        cap_eta_mask,
-        Delta_theta,
+    eta_1d = jnp.linspace(eta_min, eta_max, neta)
+    alpha_1d = jnp.linspace(
         0.0,
+        2.0 * jnp.pi,
+        nalpha,
+        endpoint=False,
     )
+
+    # Shape = (nalpha, neta), same convention as test_mask.py.
+    eta_2d, alpha_2d = jnp.meshgrid(
+        eta_1d,
+        alpha_1d,
+        indexing="xy",
+    )
+
+    zeta_eff = _zeta_LCForm_raw(
+        eta_2d,
+        alpha_2d,
+        iota_eff,
+        S_list,
+        D_list,
+        S_func,
+        D_func,
+    )
+
+    # eta -> 2pi - eta.
+    # This is valid because eta_1d is symmetric around pi.
+    zeta_eff_mirror = zeta_eff[:, ::-1]
+
+    condition_value_raw = zeta_eff - zeta_eff_mirror + 2.0 * jnp.pi
+
+    # Condition defined in the lower branch and reflected to the upper branch too.
+    condition_value = jnp.where(
+        eta_2d <= jnp.pi,
+        condition_value_raw,
+        condition_value_raw[:, ::-1],
+    )
+
+    mask_2d = condition_value >= 0
+
+    # Main output. This will be use for the Omnigenity_pwO objective function. 
+    data["pwO_mask"] = jnp.ravel(mask_2d, order="F")
+
+    # Diagnostics / plotting.
+    data["pwO_mask_2D"] = mask_2d
+    data["pwO_mask_eta"] = eta_1d
+    data["pwO_mask_alpha"] = alpha_1d
+    data["pwO_mask_eta_2D"] = eta_2d
+    data["pwO_mask_alpha_2D"] = alpha_2d
+    data["pwO_mask_condition"] = jnp.ravel(condition_value, order="F")
+    data["pwO_mask_condition_2D"] = condition_value
+    data["pwO_mask_zeta_eff"] = jnp.ravel(zeta_eff, order="F")
+    data["pwO_mask_zeta_eff_2D"] = zeta_eff
 
     return data

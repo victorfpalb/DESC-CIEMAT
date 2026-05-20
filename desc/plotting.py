@@ -7,6 +7,12 @@ import warnings
 
 import matplotlib
 import matplotlib.pyplot as plt
+
+import matplotlib.tri as mtri
+
+from desc.backend import jnp
+from desc.compute._omnigenity import _iota_eff_LCForm, _zeta_LCForm_raw # Is this needed? 
+
 import numpy as np
 import plotly.graph_objects as go
 from diffrax import RESULTS
@@ -44,7 +50,7 @@ __all__ = [
     "plot_basis",
     "plot_boozer_modes",
     "plot_boozer_surface",
-    "plot_boozer_LCField",
+    "plot_boozer_LCField", # NEW
     "plot_boundaries",
     "plot_boundary",
     "plot_coefficients",
@@ -3350,71 +3356,82 @@ def plot_boozer_LCField(
     thing,
     iota=None,
     rho=1,
-    nalpha=191,
-    neta_center=None,
-    neta_cap=None,
+    neta=64,
+    nalpha=128,
     fill=False,
-    ncontours=64,
+    ncontours=30,
+    levels=None,
+    cmap="jet",
     fieldlines=0,
     positive_zeta=True,
     ax=None,
+    figsize=(6,6),
     return_data=False,
+    max_tri_edge_factor=8.0,
+    title_fontsize=None,
+    xlabel_fontsize=None,
+    ylabel_fontsize=None,
     **kwargs,
 ):
-    """Plot an LCForm field on the expanded LC domain.
+    """Plot :math:`|B|` of an OmnigenousFieldLC on a surface vs the Boozer poloidal and toroidal angles.
 
-    The plotted domain is the union of three regions:
+    Parameters
+    ----------
+    thing : OmnigenousFieldLCField. It needs to have S_func and D_func as atribbutes. 
+        Object from which to plot.
+    iota: rotational transform of the field. 
+        Must match with the eq. iota at the desired surface. 
+    neta, nalpha: Resolution in (eta, alpha) coordinate system, optional
+        Increase if wanted. This will calculate more accurately the valid points of the mask. 
+    rho : float, optional
+        Radial coordinate of flux surface. Used only if grids are not specified.
+    fill : bool, optional
+        Whether the contours are filled, i.e. whether to use `contourf` or `contour`.
+    ncontours : int, optional
+        Number of contours to plot.
+    fieldlines : int, optional
+        Number of (linearly spaced) magnetic fieldlines to plot. Default is 0 (none).
+    ax : matplotlib AxesSubplot, optional
+        Axis to plot on.
+    return_data : bool
+        If True, return the data plotted as well as fig,ax
+    **kwargs : dict, optional
+        Specify properties of the figure, axis, and plot appearance e.g.::
 
-        lower:
-            eta_crit < eta < Delta_eta
-            pi - Delta_theta(eta) < alpha < pi + Delta_theta(eta)
+            plot_X(figsize=(4,6),cmap="plasma")
 
-        center:
-            Delta_eta < eta < 2*pi - Delta_eta
-            0 < alpha < 2*pi
-
-        upper:
-            2*pi - Delta_eta < eta < 2*pi - eta_crit
-            pi - Delta_theta(eta) < alpha < pi + Delta_theta(eta)
-
-    The function builds each region as a structured grid in (eta, alpha),
-    maps all points to Boozer coordinates, wraps them into the fundamental
-    Boozer cell, and plots them with tricontour/tricontourf.
+        Valid keyword arguments are:
+        * ``figsize``: tuple of length 2, the size of the figure (to be passed to
+          matplotlib)
+        * ``cmap``: str, matplotlib colormap scheme to use, passed to ax.contourf
+        * ``levels``: int or array-like, passed to contourf
+        * ``title_fontsize``: integer, font size of the title
+        * ``xlabel_fontsize``: float, fontsize of the xlabel
+        * ``ylabel_fontsize``: float, fontsize of the ylabel
     """
-    from desc.backend import jnp
-    from desc.compute._omnigenity import _iota_eff_LCForm, _zeta_LCForm_raw
-    import matplotlib.tri as mtri
 
-    errorif(iota is None, msg="iota must be supplied for LCForm field plotting.")
+    if iota is None:
+        raise ValueError("iota must be supplied for LCForm field plotting.")
 
-    errorif(
-        not (hasattr(thing, "S_len") or hasattr(thing, "_S_len")),
-        msg="plot_boozer_LCField_v2 only supports LCForm-like fields.",
-    )
+    if not (hasattr(thing, "S_len") or hasattr(thing, "_S_len")):
+        raise ValueError("plot_boozer_LCField only supports LCForm-like fields.")
 
     S_func = getattr(thing, "_S_func", getattr(thing, "S_func", None))
     D_func = getattr(thing, "_D_func", getattr(thing, "D_func", None))
 
-    errorif(
-        S_func is None or D_func is None,
-        msg="LCForm field must provide S_func and D_func.",
-    )
+    if S_func is None or D_func is None:
+        raise ValueError("LCForm field must provide S_func and D_func.")
 
-    neta_center = setdefault(neta_center, 2 * nalpha)
-    neta_cap = setdefault(neta_cap, max(8, neta_center // 2))
+    if len(kwargs) != 0:
+        raise ValueError(
+            f"plot_boozer_LCField got unexpected keyword arguments: {kwargs.keys()}"
+        )
 
-    root_tol = kwargs.pop("root_tol", 1e-8)
-    root_maxiter = kwargs.pop("root_maxiter", 30)
-    root_maxiter_ls = kwargs.pop("root_maxiter_ls", 5)
-    eps_eta = kwargs.pop("eps_eta", 1e-6)
-    max_tri_edge_factor = kwargs.pop("max_tri_edge_factor", 8.0)
+    Lz = 2.0 * np.pi / thing.NFP
 
-    TWOPI = 2.0 * np.pi
-    Lz = TWOPI / thing.NFP
+    # Compute field data
 
-    # 1. First calculate Delta_eta and eta_cr
-
-    scalar_grid = LinearGrid(
+    scalar_grid = LinearGrid( # dummy grid for eta_cr
         rho=rho,
         theta=np.array([0.0]),
         zeta=np.array([0.0]),
@@ -3422,258 +3439,155 @@ def plot_boozer_LCField(
         sym=False,
     )
 
-    scalar_keys = [
-        "S_list",
-        "D_list",
-        "eta_crit_LCForm",
-        "Delta_eta_LCForm",
-    ]
+    mask_data = thing.compute(
+        ["pwO_mask", "S_list", "D_list", "eta_crit_LCForm"],
+        grid=scalar_grid,
+        helicity=thing.helicity,
+        iota=iota,
+        S_func=S_func,
+        D_func=D_func,
+        neta_pwO_mask=neta,
+        nalpha_pwO_mask=nalpha,
+    )
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        scalar_data = thing.compute(
-            scalar_keys,
-            grid=scalar_grid,
-            helicity=thing.helicity,
-            iota=iota,
-            S_func=S_func,
-            D_func=D_func,
-            root_tol=root_tol,
-            root_maxiter=root_maxiter,
-            root_maxiter_ls=root_maxiter_ls,
+    mask_2d = np.asarray(mask_data["pwO_mask_2D"]).astype(bool)
+    eta_2d = np.asarray(mask_data["pwO_mask_eta_2D"])
+    alpha_2d = np.asarray(mask_data["pwO_mask_alpha_2D"])
+
+    eta_1d = np.asarray(mask_data["pwO_mask_eta"])
+    alpha_1d = np.asarray(mask_data["pwO_mask_alpha"])
+
+    eta_crit = float(np.asarray(mask_data["eta_crit_LCForm"]).squeeze())
+
+    S_list = jnp.asarray(mask_data["S_list"])
+    D_list = jnp.asarray(mask_data["D_list"])
+
+    # Valid points in (eta, alpha)
+    eta_valid = eta_2d[mask_2d]
+    alpha_valid = alpha_2d[mask_2d]
+
+    if eta_valid.size < 3:
+        raise ValueError(
+            "pwO_mask produced fewer than 3 valid points, cannot triangulate."
         )
 
-    eta_crit = float(np.asarray(scalar_data["eta_crit_LCForm"]).squeeze())
-    Delta_eta = float(np.asarray(scalar_data["Delta_eta_LCForm"]).squeeze())
+    # Compute B_LC (eta, alpha) in the valid points of the mask
 
-    S_list = jnp.asarray(scalar_data["S_list"])
-    D_list = jnp.asarray(scalar_data["D_list"])
-
-    warnif(
-        not (0.0 < eta_crit < Delta_eta < np.pi),
-        RuntimeWarning,
-        "LC expanded domain may be invalid: expected 0 < eta_crit < Delta_eta < pi.",
+    grid_eta_alpha = LinearGrid(
+        rho=rho,
+        theta=alpha_1d,
+        zeta=eta_1d / thing.NFP,
+        NFP=thing.NFP,
+        sym=False,
     )
 
-    # 2. Build the eta grid for the three different regions
-
-    eta_lower = np.linspace(
-        eta_crit + eps_eta,
-        Delta_eta - eps_eta,
-        neta_cap,
-        endpoint=True,
+    B_data = thing.compute(
+        ["|B|_LCForm"],
+        grid=grid_eta_alpha,
+        helicity=thing.helicity,
+        iota=iota,
+        S_func=S_func,
+        D_func=D_func,
     )
 
-    eta_center = np.linspace(
-        Delta_eta,
-        TWOPI - Delta_eta,
-        neta_center,
-        endpoint=True,
+    B_2d = np.asarray(B_data["|B|_LCForm"]).reshape(
+        (alpha_1d.size, eta_1d.size),
+        order="F",
     )
 
-    eta_upper = np.linspace(
-        TWOPI - Delta_eta + eps_eta,
-        TWOPI - eta_crit - eps_eta,
-        neta_cap,
-        endpoint=True,
-    )
+    B_valid = B_2d[mask_2d]
 
-    # 3. Compute Delta_theta and |B| in the three regions
-
-    def _compute_1d_eta(keys, eta_1d):
-        grid = LinearGrid(
-            rho=rho,
-            theta=np.array([0.0]),
-            zeta=np.asarray(eta_1d) / thing.NFP,
-            NFP=thing.NFP,
-            sym=False,
-        )
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            return thing.compute(
-                keys,
-                grid=grid,
-                helicity=thing.helicity,
-                iota=iota,
-                S_func=S_func,
-                D_func=D_func,
-                root_tol=root_tol,
-                root_maxiter=root_maxiter,
-                root_maxiter_ls=root_maxiter_ls,
-            )
-
-    cap_keys = [
-        "eta_LCForm",
-        "eta_crit_LCForm",
-        "Delta_eta_LCForm",
-        "Delta_theta_LCForm",
-        "|B|_LCForm",
-    ]
-
-    center_keys = [
-        "eta_LCForm",
-        "|B|_LCForm",
-    ]
-
-    lower_data = _compute_1d_eta(cap_keys, eta_lower)
-    center_data = _compute_1d_eta(center_keys, eta_center)
-    upper_data = _compute_1d_eta(cap_keys, eta_upper)
-
-    Delta_theta_lower = np.asarray(lower_data["Delta_theta_LCForm"]).ravel(order="F")
-    Delta_theta_upper = np.asarray(upper_data["Delta_theta_LCForm"]).ravel(order="F")
-
-    B_lower_1d = np.asarray(lower_data["|B|_LCForm"]).ravel(order="F")
-    B_center_1d = np.asarray(center_data["|B|_LCForm"]).ravel(order="F")
-    B_upper_1d = np.asarray(upper_data["|B|_LCForm"]).ravel(order="F")
-
-    # 4. Build structured (eta, alpha) grids in the three regions
-
-    alpha_center_1d = np.linspace(0.0, TWOPI, nalpha, endpoint=False)
-    u = np.linspace(0.0, 1.0, nalpha, endpoint=True)
-
-    alpha_lower = (
-        np.pi
-        - Delta_theta_lower[:, None]
-        + 2.0 * Delta_theta_lower[:, None] * u[None, :]
-    )
-
-    alpha_center = np.tile(
-        alpha_center_1d[None, :],
-        (neta_center, 1),
-    )
-
-    alpha_upper = (
-        np.pi
-        - Delta_theta_upper[:, None]
-        + 2.0 * Delta_theta_upper[:, None] * u[None, :]
-    )
-
-    eta_lower_2d = eta_lower[:, None] * np.ones_like(alpha_lower)
-    eta_center_2d = eta_center[:, None] * np.ones_like(alpha_center)
-    eta_upper_2d = eta_upper[:, None] * np.ones_like(alpha_upper)
-
-    B_lower = B_lower_1d[:, None] * np.ones_like(alpha_lower)
-    B_center = B_center_1d[:, None] * np.ones_like(alpha_center)
-    B_upper = B_upper_1d[:, None] * np.ones_like(alpha_upper)
-
-    # 5. Map LC coordinates to Boozer angles: (eta, alpha) -> (zeta_B, theta_B)
+    # Map valid points of the mask to Boozer coordinates: B_LC (zeta_B, theta_B)
 
     M, N = thing.helicity
-    iota_eff = _iota_eff_LCForm(M, N, jnp.atleast_1d(iota), thing.NFP)
 
-    def _map_region(alpha2d, eta2d):
-        eta_j = jnp.asarray(eta2d)
-        alpha_j = jnp.asarray(alpha2d)
+    iota_eff = _iota_eff_LCForm(
+        M,
+        N,
+        jnp.atleast_1d(iota),
+        thing.NFP,
+    )
+    iota_eff = jnp.ravel(iota_eff)[0]
 
-        zeta_calc = _zeta_LCForm_raw(
-            eta_j,
-            alpha_j,
-            iota_eff,
-            S_list,
-            D_list,
-            S_func,
-            D_func,
-        )
+    eta_j = jnp.asarray(eta_valid)
+    alpha_j = jnp.asarray(alpha_valid)
 
-        theta_calc = alpha_j
-
-        if N == 0:
-            theta_B = zeta_calc
-            zeta_B = theta_calc
-        else:
-            N_change = thing.NFP if (N * M != 0) else N
-            NFP_change = N if (N * M != 0) else thing.NFP
-
-            theta_B = theta_calc
-            zeta_B = zeta_calc / (NFP_change * N_change) + (M / N_change) * theta_B
-
-        theta_B = np.asarray(theta_B)
-        zeta_B = np.asarray(zeta_B)
-
-        if positive_zeta and N < 0:
-            zeta_B = -zeta_B
-            theta_B = TWOPI - theta_B
-
-        return theta_B, zeta_B
-
-    theta_lower, zeta_lower = _map_region(alpha_lower, eta_lower_2d)
-    theta_center, zeta_center = _map_region(alpha_center, eta_center_2d)
-    theta_upper, zeta_upper = _map_region(alpha_upper, eta_upper_2d)
-
-    regions = [
-        {
-            "name": "lower_cap",
-            "theta_B": theta_lower,
-            "zeta_B": zeta_lower,
-            "|B|": B_lower,
-            "eta": eta_lower_2d,
-            "alpha": alpha_lower,
-        },
-        {
-            "name": "center",
-            "theta_B": theta_center,
-            "zeta_B": zeta_center,
-            "|B|": B_center,
-            "eta": eta_center_2d,
-            "alpha": alpha_center,
-        },
-        {
-            "name": "upper_cap",
-            "theta_B": theta_upper,
-            "zeta_B": zeta_upper,
-            "|B|": B_upper,
-            "eta": eta_upper_2d,
-            "alpha": alpha_upper,
-        },
-    ]
-
-    # 6. Wrap into the fundamental Boozer cell and concatenate regions
-
-    zeta_B = np.concatenate(
-        [np.mod(region["zeta_B"].ravel(order="F"), Lz) for region in regions]
+    zeta_calc = _zeta_LCForm_raw(
+        eta_j,
+        alpha_j,
+        iota_eff,
+        S_list,
+        D_list,
+        S_func,
+        D_func,
     )
 
-    theta_B = np.concatenate(
-        [np.mod(region["theta_B"].ravel(order="F"), TWOPI) for region in regions]
+    theta_calc = alpha_j
+
+    if N == 0:
+        theta_B = zeta_calc
+        zeta_B = theta_calc
+    else:
+        N_change = thing.NFP if (N * M != 0) else N
+        NFP_change = N if (N * M != 0) else thing.NFP
+
+        theta_B = theta_calc
+        zeta_B = zeta_calc / (NFP_change * N_change) + (M / N_change) * theta_B
+
+    theta_B = np.asarray(theta_B)
+    zeta_B = np.asarray(zeta_B)
+
+    if positive_zeta and N < 0:
+        zeta_B = -zeta_B
+        theta_B = 2.0 * np.pi - theta_B
+
+    # Wrap into Boozer fundamental cell
+
+    zeta_B = np.mod(zeta_B, Lz)
+    theta_B = np.mod(theta_B, 2.0 * np.pi)
+    B = np.asarray(B_valid)
+
+    valid = (
+        np.isfinite(zeta_B)
+        & np.isfinite(theta_B)
+        & np.isfinite(B)
     )
 
-    B = np.concatenate(
-        [region["|B|"].ravel(order="F") for region in regions]
-    )
-
-    valid = np.isfinite(zeta_B) & np.isfinite(theta_B) & np.isfinite(B)
     zeta_B = zeta_B[valid]
     theta_B = theta_B[valid]
     B = B[valid]
 
-    # 7. Set plot configuration and plot using tricontour/tricontourf
+    # contour levels
 
     Bmin = np.nanmin(B)
     Bmax = np.nanmax(B)
 
+    if levels is None:
+        if np.isclose(Bmin, Bmax):
+            levels = np.linspace(Bmin - 1e-12, Bmax + 1e-12, ncontours)
+        else:
+            levels = np.linspace(Bmin, Bmax, ncontours)
+
     contour_kwargs = {
+        "levels": levels,
+        "cmap": cmap,
         "norm": matplotlib.colors.Normalize(),
-        "levels": kwargs.pop("levels", np.linspace(Bmin, Bmax, ncontours)),
-        "cmap": kwargs.pop("cmap", "jet"),
         "extend": "both",
     }
 
-    title_fontsize = kwargs.pop("title_fontsize", None)
-    xlabel_fontsize = kwargs.pop("xlabel_fontsize", None)
-    ylabel_fontsize = kwargs.pop("ylabel_fontsize", None)
-    figsize = kwargs.pop("figsize", None)
+    # Figure / axes
 
-    assert (
-        len(kwargs) == 0
-    ), f"plot_boozer_LCField_v2 got unexpected keyword argument: {kwargs.keys()}"
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
+    else:
+        fig = ax.figure
 
-    fig, ax = _format_ax(ax, figsize=figsize)
     divider = make_axes_locatable(ax)
 
     triang = mtri.Triangulation(zeta_B, theta_B)
 
     triangles = triang.triangles
+
     xtri = zeta_B[triangles]
     ytri = theta_B[triangles]
 
@@ -3684,31 +3598,53 @@ def plot_boozer_LCField(
     edges = np.concatenate([e01, e12, e20])
     max_edge = max_tri_edge_factor * np.nanmedian(edges)
 
-    triang.set_mask((e01 > max_edge) | (e12 > max_edge) | (e20 > max_edge))
+    triang.set_mask(
+        (e01 > max_edge)
+        | (e12 > max_edge)
+        | (e20 > max_edge)
+    )
 
     op = ax.tricontourf if fill else ax.tricontour
     im = op(triang, B, **contour_kwargs)
 
-    cax_kwargs = {"size": "5%", "pad": 0.05}
-    cax = divider.append_axes("right", **cax_kwargs)
+    cax = divider.append_axes("right", size="5%", pad=0.05)
     cbar = fig.colorbar(im, cax=cax)
+    cbar.set_label(r"$B$")
     cbar.update_ticks()
+
+    # (Optional) Fieldlines
 
     if fieldlines:
         iota0 = float(np.asarray(iota).squeeze())
 
-        zeta = np.linspace(0.0, Lz, 100)
-        theta0 = np.linspace(0.0, TWOPI, fieldlines, endpoint=False)
+        zeta_line = np.linspace(0.0, Lz, 100)
+        theta0 = np.linspace(0.0, 2.0 * jnp.pi, fieldlines, endpoint=False)
 
-        alpha = np.atleast_2d(theta0) + iota0 * np.atleast_2d(zeta).T
-        alpha1 = np.where(np.logical_and(alpha >= 0.0, alpha <= TWOPI), alpha, np.nan)
-        alpha2 = np.where(
-            np.logical_or(alpha < 0.0, alpha > TWOPI),
-            alpha % (sign(iota0) * TWOPI) + (sign(iota0) < 0) * TWOPI,
+        alpha_line = np.atleast_2d(theta0) + iota0 * np.atleast_2d(zeta_line).T
+
+        alpha1 = np.where(
+            np.logical_and(alpha_line >= 0.0, alpha_line <= 2.0 * jnp.pi),
+            alpha_line,
             np.nan,
         )
+
+        alpha2 = np.where(
+            np.logical_or(alpha_line < 0.0, alpha_line > 2.0 * jnp.pi),
+            np.mod(alpha_line, 2.0 * jnp.pi),
+            np.nan,
+        )
+
         alphas = np.hstack((alpha1, alpha2))
-        ax.plot(zeta, alphas, color="k", ls="-", lw=2)
+
+        ax.plot(
+            zeta_line,
+            alphas,
+            color="k",
+            ls="-",
+            lw=2,
+        )
+
+    # Formatting
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -3723,36 +3659,52 @@ def plot_boozer_LCField(
     )
 
     ax.set_xlim(0.0, Lz)
-    ax.set_ylim(0.0, TWOPI)
+    ax.set_ylim(0.0, 2.0 * jnp.pi)
 
     ax.set_xlabel(r"$\zeta_{Boozer}$", fontsize=xlabel_fontsize)
     ax.set_ylabel(r"$\theta_{Boozer}$", fontsize=ylabel_fontsize)
 
+    ax.set_xticks([0.0, Lz / 2.0, Lz])
+    ax.set_xticklabels(
+        [
+            r"$0$",
+            r"$\pi/N_{\rm FP}$",
+            r"$2\pi/N_{\rm FP}$",
+        ]
+    )
+
+    ax.set_yticks([0.0, np.pi, 2.0 * jnp.pi])
+    ax.set_yticklabels(
+        [
+            r"$0$",
+            r"$\pi$",
+            r"$2\pi$",
+        ]
+    )
+
     ax.set_title(
         rf"$|\mathbf{{B}}|~(T)$, "
-        rf"$\eta_{{cr}}={eta_crit:.4f}$, "
-        rf"$\Delta\eta={Delta_eta:.4f}$",
+        rf"$\eta_{{cr}}={eta_crit:.4f}$",
         fontsize=title_fontsize,
     )
 
-    _set_tight_layout(fig)
-
     plot_data = {
-        "regions": regions,
         "theta_B": theta_B,
         "zeta_B": zeta_B,
         "|B|": B,
         "triangulation": triang,
+        "eta_valid": eta_valid,
+        "alpha_valid": alpha_valid,
+        "eta_2D": eta_2d,
+        "alpha_2D": alpha_2d,
+        "B_2D": B_2d,
+        "mask_2D": mask_2d,
+        "eta": eta_1d,
+        "alpha": alpha_1d,
         "eta_crit": eta_crit,
-        "Delta_eta": Delta_eta,
-        "eta_lower": eta_lower,
-        "eta_center": eta_center,
-        "eta_upper": eta_upper,
-        "Delta_theta_lower": Delta_theta_lower,
-        "Delta_theta_upper": Delta_theta_upper,
-        "B_lower_1d": B_lower_1d,
-        "B_center_1d": B_center_1d,
-        "B_upper_1d": B_upper_1d,
+        "valid_fraction": np.mean(mask_2d),
+        "Bmin": Bmin,
+        "Bmax": Bmax,
     }
 
     if return_data:
