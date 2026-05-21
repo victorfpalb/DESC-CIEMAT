@@ -8,6 +8,8 @@ from desc.compute._omnigenity import (
     _omnigenity_mapping,
     _omnigenity_mapping_OOPS,
     _omnigenity_mapping_LandremanForm,
+    _iota_eff_LCForm,
+    _zeta_LCForm_raw,
 )
 from desc.compute.utils import _compute as compute_fun
 from desc.grid import LinearGrid
@@ -1495,17 +1497,27 @@ class OmnigenityHarmonics(_Objective):
 
 
 class Omnigenity_pwO(_Objective):
-    """Pointwise pwO omnigenity objective in LCForm coordinates.
+    """Pointwise pwO omnigenity objective in (eta, alpha) coordinates, following 
+    the Landreman-Catto parametrization.
 
-    This objective evaluates the equilibrium magnetic field strength
-    on the LCForm mapped Boozer coordinates and penalizes alpha variation
-    at fixed eta.
-
-    The residual is
+    The residual is,
 
         B_eq(eta, alpha) - <B_eq(eta, alpha)>_alpha
 
-    where the alpha-average is computed only inside the active pwO domain.
+    where the alpha-average is computed only over the valid pwO domain.
+
+    The objective uses an auxiliary fixed-size grid with shape (nalpha, neta) defined on,
+
+        eta   in [eta_crit, 2*pi - eta_crit],
+        alpha in [0, 2*pi).
+
+    Inside compute, points satisfying
+
+        zeta(eta, alpha) - zeta(2*pi - eta, alpha) + 2*pi >= 0
+
+    are treated as valid. Points that do not satisfy this condition are kept
+    in the residual vector for fixed dimensionality, but their residual is
+    set to zero.
 
     Parameters
     ----------
@@ -1513,17 +1525,10 @@ class Omnigenity_pwO(_Objective):
         DESC equilibrium.
     field : OmnigenousFieldLCForm
         LCForm omnigenous / pwO field.
-    expanded : bool
-        If False, use only the central squeezed domain:
-
-            Delta_eta <= eta <= 2*pi - Delta_eta
-
-        If True, also include the lower and upper expanded caps:
-
-            eta_crit <= eta <= Delta_eta,
-            2*pi - Delta_eta <= eta <= 2*pi - eta_crit,
-            with
-            |alpha - pi| <= Delta_theta(eta).
+    neta : int, optional
+        Number of eta points in the auxiliary objective grid.
+    nalpha : int, optional
+        Number of alpha points in the auxiliary objective grid.
     """
 
     _coordinates = "rtz"
@@ -1536,9 +1541,10 @@ class Omnigenity_pwO(_Objective):
         "_field_data_keys",
         "_field_fixed",
         "_helicity",
+        "neta",
+        "nalpha",
         "M_booz",
         "N_booz",
-        "expanded",
         "S_function",
         "D_function",
     ]
@@ -1559,7 +1565,8 @@ class Omnigenity_pwO(_Objective):
         M_booz=None,
         N_booz=None,
         eta_weight=1,
-        expanded=False,
+        neta=32,
+        nalpha=64,
         eq_fixed=False,
         field_fixed=False,
         name="Omnigenity_pwO",
@@ -1578,7 +1585,9 @@ class Omnigenity_pwO(_Objective):
         self.N_booz = N_booz
 
         self.eta_weight = eta_weight
-        self.expanded = expanded
+
+        self.neta = neta
+        self.nalpha = nalpha
 
         self.helicity = field.helicity
         self._helicity = field.helicity
@@ -1627,14 +1636,12 @@ class Omnigenity_pwO(_Objective):
         M_booz = self.M_booz or 2 * eq.M
         N_booz = self.N_booz or 2 * eq.N
 
-        # ------------------------------------------------------------
         # Grids
-        # ------------------------------------------------------------
         if self._field_grid is None:
             field_grid = LinearGrid(
                 rho=1.0,
-                M=2 * field.M_B,
-                N=2 * field.N_x,
+                theta=np.linspace(0.0, 2.0 * jnp.pi, self.nalpha, endpoint=False),
+                zeta=np.linspace(0.0, 2.0 * jnp.pi / field.NFP, self.neta, endpoint=False),
                 NFP=field.NFP,
                 sym=False,
             )
@@ -1674,13 +1681,18 @@ class Omnigenity_pwO(_Objective):
 
         # field data keys
         self._field_data_keys = [
-            "theta_B_LCForm",
-            "zeta_B_LCForm",
-            "eta_LCForm",
+            "S_list",
+            "D_list",
             "eta_crit_LCForm",
-            "Delta_eta_LCForm",
-            "Delta_theta_LCForm",
         ]
+
+        # Ahora mismo solo funciona para QI (por cálculo de theta_B y zeta_B), a cambiar en un futuro en el compute. 
+        M, N = self.helicity
+        errorif(
+            not (M == 0 and abs(N) == 1),
+            ValueError,
+            "Omnigenity_pwO is currently implemented only for QI helicity (M, N) = (0, ±1).",
+        )
 
         if verbose > 0:
             print("Precomputing transforms")
@@ -1708,13 +1720,14 @@ class Omnigenity_pwO(_Objective):
             grid=field_grid,
         )
 
+        # I define here the dimention of the residual to define the _weight in self._constants
+        self._dim_f = field_grid.num_nodes
+
         self._constants = {
             # standard constant keys 
             "profiles": {},
             "transforms": field_transforms,
-
-            # IS THIS NECESSARY?
-            # custom for this objective
+            "quad_weights": jnp.ones(self._dim_f),
             "eq_profiles": eq_profiles,
             "eq_transforms": eq_transforms,
             "field_transforms": field_transforms,
@@ -1731,11 +1744,6 @@ class Omnigenity_pwO(_Objective):
             )
             self._constants["eq_data"] = eq_data
 
-        # DISCLAIMER: THE RESIDUAL HAVE THE SIZE OF THE FULL GRID! 
-        # Points outside the active pwO domain are not removed;
-        # they are simply multiplied by zero using the mask.
-        self._dim_f = field_grid.num_nodes
-
         timer.stop("Precomputing transforms")
 
         if verbose > 1:
@@ -1748,7 +1756,7 @@ class Omnigenity_pwO(_Objective):
         super().build(use_jit=use_jit, verbose=verbose)
 
     def compute(self, params_1=None, params_2=None, constants=None):
-        """Compute the pwO / expanded-pwO residual."""
+        """Compute the pointwise pwO residual."""
 
         if constants is None:
             constants = self.constants
@@ -1795,16 +1803,66 @@ class Omnigenity_pwO(_Objective):
             D_func=self.D_function,
         )
 
-        theta_B = field_data["theta_B_LCForm"]
-        zeta_B = field_data["zeta_B_LCForm"]
+        # COMPUTE THE MASK OF VALID POINTS #
+        # needed to calculate _zeta_eff_LCForm_raw
+        S_list = field_data["S_list"]
+        D_list = field_data["D_list"]
 
-        theta_B = field_grid.meshgrid_reshape(theta_B, "rtz").reshape(
-            (field_grid.num_rho, -1)
+        eta_crit = jnp.ravel(field_data["eta_crit_LCForm"])[0]
+
+        # TODO: REVISAR ESTO. Esto ahora es un penalty enorme par que eta_cr no sea menor que cero. 
+        eta_cr_penalty_weight = 1e6
+        eta_cr_penalty = eta_cr_penalty_weight * jnp.maximum(0.0, -eta_crit)
+
+        nalpha = field_grid.num_theta
+        neta = field_grid.num_zeta
+
+        # Create the real grid in (eta, alpha) coordinates of the residual
+        eta_1d = jnp.linspace( eta_crit, 2.0 * jnp.pi - eta_crit, neta,)
+        alpha_1d = jnp.linspace( 0.0, 2.0 * jnp.pi, nalpha, endpoint=False,)
+
+        eta_2d, alpha_2d = jnp.meshgrid(eta_1d, alpha_1d,indexing="xy",)
+
+        # Calculate the condition of valid points 
+
+        M, N = constants["helicity"]
+
+        iota_eff = _iota_eff_LCForm(M, N, iota, field_grid.NFP,)
+        iota_eff = jnp.ravel(iota_eff)[0]
+
+        zeta_eff = _zeta_LCForm_raw(
+            eta_2d,
+            alpha_2d,
+            iota_eff,
+            S_list,
+            D_list,
+            self.S_function,
+            self.D_function,
         )
 
-        zeta_B = field_grid.meshgrid_reshape(zeta_B, "rtz").reshape(
-            (field_grid.num_rho, -1)
+        zeta_eff_mirror = zeta_eff[:, ::-1] # eta -> 2pi - eta. Valid because eta_1d is symmetric around pi.
+
+        condition_value_raw = zeta_eff - zeta_eff_mirror + 2.0 * jnp.pi
+
+        condition_value = jnp.where(
+            eta_2d <= jnp.pi, # To separate different branches 
+            condition_value_raw, # Low branch 
+            condition_value_raw[:, ::-1], # Upper branch 
         )
+
+        # Valid points of the mask
+        mask = (condition_value >= 0.0).astype(zeta_eff.dtype)
+
+        # TODO: CAMBIAR ESTO PARA OTRAS HELICIDADES Y NO SOLO PARA QUI
+        M, N = constants["helicity"]
+
+        theta_B = alpha_2d
+        zeta_B = zeta_eff / (field_grid.NFP * N)
+
+        theta_B = jnp.ravel(theta_B, order="F")
+        zeta_B = jnp.ravel(zeta_B, order="F")
+
+        # Evaluate B_eq(theta_B, zeta_B) #
 
         def _compute_B_eta_alpha(theta_B, zeta_B, B_mn):
             nodes = jnp.vstack(
@@ -1822,31 +1880,18 @@ class Omnigenity_pwO(_Objective):
 
             return B_eta_alpha
 
+        theta_B = theta_B.reshape((1, -1))
+        zeta_B = zeta_B.reshape((1, -1))
+
         B_mn = eq_data["|B|_mn_B"].reshape((eq_grid.num_rho, -1))       
 
         B_eta_alpha = vmap(_compute_B_eta_alpha)(theta_B, zeta_B, B_mn)
 
-        B_eta_alpha = B_eta_alpha.reshape(
-            (
-                field_grid.num_rho,
-                field_grid.num_theta,
-                field_grid.num_zeta,
-            )
+        # B_eq(eta, alpha) in 2D, for the surface to optimize. 
+        B2 = B_eta_alpha[-1].reshape(
+            (field_grid.num_theta, field_grid.num_zeta),
+            order="F",
         )
-
-        # Single surface
-        B2 = B_eta_alpha[-1]
-
-        # Build active mask. Will change if expanded or not
-        mask = self._pwo_mask(field_data, field_grid)
-        mask = mask.astype(B2.dtype)
-
-        # Residual is the average over alpha at fixed eta, but only inside mask
-        #
-        # For each eta_j:
-        #   B_avg(eta_j) =
-        #       sum_alpha B(alpha, eta_j) * mask(alpha, eta_j) /
-        #       sum_alpha mask(alpha, eta_j)
 
         numerator = jnp.sum(B2 * mask, axis=0, keepdims=True)
         denominator = jnp.sum(mask, axis=0, keepdims=True)
@@ -1857,65 +1902,9 @@ class Omnigenity_pwO(_Objective):
 
         # residual 
         residual = (B2 - B_avg_alpha) * mask
+        residual = residual + eta_cr_penalty
+
+        import jax
+        jax.debug.breakpoint()
 
         return residual.flatten(order="F")
-
-    def _pwo_mask(self, field_data, field_grid):
-        """Build the active pwO domain mask.
-
-        The output has shape (nalpha, neta), with 1's in points inside the domain and 0 otherwise. 
-
-        There are two possible domains: 
-            - not expanded / central: Delta_eta <= eta <= 2*pi - Delta_eta
-            - expanded / lower + central + upper: eta_crit <= eta <= Delta_eta
-                                                  2*pi - Delta_eta <= eta <= 2*pi - eta_crit
-                                                  |alpha - pi| <= Delta_theta(eta)
-
-        """
-
-        nalpha = field_grid.num_theta
-        neta = field_grid.num_zeta
-
-        # eta grid 
-        eta = field_data["eta_LCForm"].reshape((nalpha, neta), order="F")
-        eta = jnp.mod(eta, 2*jnp.pi) # eta has to be between 0 and 2pi
-
-        # alpha grid
-        alpha = field_grid.nodes[:, 1].reshape((nalpha, neta), order="F")
-        alpha = jnp.mod(alpha, 2 * jnp.pi)
-
-        # Scalar quantities for the limits of the domains. 
-        Delta_eta = jnp.ravel(field_data["Delta_eta_LCForm"])[0]
-        eta_crit = jnp.ravel(field_data["eta_crit_LCForm"])[0]
-
-        # a) central squeezed domain
-        mask_center = (eta >= Delta_eta) & (eta <= 2 * jnp.pi - Delta_eta)
-
-        # If we do not want the expanded version, we stop here!
-        if not self.expanded:
-            return mask_center
-
-        # Calculate Delta_theta for the other two domains
-        Delta_theta = field_data["Delta_theta_LCForm"].reshape(
-            (nalpha, neta),
-            order="F",
-        )
-
-        # Distance of theta from pi
-        dist_alpha_pi = jnp.abs(alpha - jnp.pi)
-        mask_alpha = dist_alpha_pi <= Delta_theta
-
-        # b) Lower domain
-        mask_lower = (eta >= eta_crit) & (eta <= Delta_eta)
-
-        # c) Upper domain
-        mask_upper = (eta >= 2*jnp.pi - Delta_eta) & (
-            eta <= 2*jnp.pi - eta_crit
-        )
-
-        # Full mask
-        mask_extended = mask_alpha & (mask_lower | mask_upper)
-
-        mask_total = mask_center | mask_extended
-
-        return mask_total
