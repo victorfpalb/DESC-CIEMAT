@@ -1904,7 +1904,4 @@ class Omnigenity_pwO(_Objective):
         residual = (B2 - B_avg_alpha) * mask
         residual = residual + eta_cr_penalty
 
-        import jax
-        jax.debug.breakpoint()
-
         return residual.flatten(order="F")

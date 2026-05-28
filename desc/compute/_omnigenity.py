@@ -1501,11 +1501,7 @@ def _pwO_mask_LCForm(params, transforms, profiles, data, **kwargs):
     )
     iota_eff = jnp.ravel(iota_eff)[0]
 
-    eta_min = jnp.clip(
-        eta_crit,
-        0,
-        jnp.pi,
-    )
+    eta_min = eta_crit # TODO: Mirar si esto puede fallar si eta_cr < 0 o > pi! 
     eta_max = 2.0 * jnp.pi - eta_min
 
     eta_1d = jnp.linspace(eta_min, eta_max, neta)
