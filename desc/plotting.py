@@ -3356,6 +3356,7 @@ def plot_boozer_LCField(
     eq, 
     thing, 
     rho=1,
+    iota=None, 
     neta=64,
     nalpha=128,
     fill=False,
