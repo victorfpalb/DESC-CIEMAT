@@ -1812,7 +1812,7 @@ class Omnigenity_pwO(_Objective):
 
         # TODO: REVISAR ESTO. Esto ahora es un penalty enorme par que eta_cr no sea menor que cero. 
         eta_cr_penalty_weight = 1e6
-        eta_cr_penalty = eta_cr_penalty_weight * jnp.maximum(0.0, -eta_crit)
+        eta_cr_penalty = eta_cr_penalty_weight * jnp.maximum(0.0, -eta_crit) # Esto para eta_cr negativo
 
         nalpha = field_grid.num_theta
         neta = field_grid.num_zeta
@@ -1853,9 +1853,8 @@ class Omnigenity_pwO(_Objective):
         # Valid points of the mask
         mask = (condition_value >= 0.0).astype(zeta_eff.dtype)
 
-        # TODO: CAMBIAR ESTO PARA OTRAS HELICIDADES Y NO SOLO PARA QUI
-        M, N = constants["helicity"]
-
+        # TODO: CAMBIAR ESTO PARA OTRAS HELICIDADES Y NO SOLO PARA QI
+        
         theta_B = alpha_2d
         zeta_B = zeta_eff / (field_grid.NFP * N)
 
