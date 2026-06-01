@@ -3353,8 +3353,8 @@ def plot_boozer_surface(
     return fig, ax
 
 def plot_boozer_LCField(
-    thing,
-    iota=None,
+    eq, 
+    thing, 
     rho=1,
     neta=64,
     nalpha=128,
@@ -3371,16 +3371,18 @@ def plot_boozer_LCField(
     title_fontsize=None,
     xlabel_fontsize=None,
     ylabel_fontsize=None,
+    M_booz=None,
+    N_booz=None,
     **kwargs,
 ):
     """Plot :math:`|B|` of an OmnigenousFieldLC on a surface vs the Boozer poloidal and toroidal angles.
 
     Parameters
     ----------
+    eq: Equilibrium. 
+        Needed for iota and to calculate the target field: B_target = <B_eq(eta, alpha)>_alpha
     thing : OmnigenousFieldLCField. It needs to have S_func and D_func as atribbutes. 
         Object from which to plot.
-    iota: rotational transform of the field. 
-        Must match with the eq. iota at the desired surface. 
     neta, nalpha: Resolution in (eta, alpha) coordinate system, optional
         Increase if wanted. This will calculate more accurately the valid points of the mask. 
     rho : float, optional
@@ -3409,12 +3411,15 @@ def plot_boozer_LCField(
         * ``xlabel_fontsize``: float, fontsize of the xlabel
         * ``ylabel_fontsize``: float, fontsize of the ylabel
     """
+    if eq is None:
+        raise ValueError("Equilibrium must be supplied for LCForm field plotting.")
+    
+    # Needed to evaluate the boozer modes of the equilibrium
+    M_booz = M_booz if M_booz is not None else 4 * eq.M
+    N_booz = N_booz if N_booz is not None else 4 * eq.N
 
     if iota is None:
-        raise ValueError("iota must be supplied for LCForm field plotting.")
-
-    if not (hasattr(thing, "S_len") or hasattr(thing, "_S_len")):
-        raise ValueError("plot_boozer_LCField only supports LCForm-like fields.")
+        iota = eq.compute("iota", grid=LinearGrid(rho=rho, M=2*eq.M_grid, N=2*eq.N_grid, NFP=eq.NFP, sym=True))["iota"][0] # Check! 
 
     S_func = getattr(thing, "_S_func", getattr(thing, "S_func", None))
     D_func = getattr(thing, "_D_func", getattr(thing, "D_func", None))
@@ -3471,32 +3476,6 @@ def plot_boozer_LCField(
             "pwO_mask produced fewer than 3 valid points, cannot triangulate."
         )
 
-    # Compute B_LC (eta, alpha) in the valid points of the mask
-
-    grid_eta_alpha = LinearGrid(
-        rho=rho,
-        theta=alpha_1d,
-        zeta=eta_1d / thing.NFP,
-        NFP=thing.NFP,
-        sym=False,
-    )
-
-    B_data = thing.compute(
-        ["|B|_LCForm"],
-        grid=grid_eta_alpha,
-        helicity=thing.helicity,
-        iota=iota,
-        S_func=S_func,
-        D_func=D_func,
-    )
-
-    B_2d = np.asarray(B_data["|B|_LCForm"]).reshape(
-        (alpha_1d.size, eta_1d.size),
-        order="F",
-    )
-
-    B_valid = B_2d[mask_2d]
-
     # Map valid points of the mask to Boozer coordinates: B_LC (zeta_B, theta_B)
 
     M, N = thing.helicity
@@ -3537,15 +3516,70 @@ def plot_boozer_LCField(
     theta_B = np.asarray(theta_B)
     zeta_B = np.asarray(zeta_B)
 
+    # Compute B_eq on those valid Boozer points
+    eq_grid = LinearGrid(
+        rho=rho,
+        M=M_booz,
+        N=N_booz,
+        NFP=eq.NFP,
+        sym=False,
+    )
+
+    eq_data = eq.compute(
+        ["|B|_mn_B"],
+        grid=eq_grid,
+        M_booz=M_booz,
+        N_booz=N_booz,
+    )
+
+    eq_transforms = get_transforms(
+        ["|B|_mn_B"],
+        obj=eq,
+        grid=eq_grid,
+        M_booz=M_booz,
+        N_booz=N_booz,
+    )
+
+    nodes = np.vstack(
+        (
+            np.zeros_like(theta_B),
+            theta_B,
+            zeta_B,
+        )
+    ).T
+
+    B_mn = np.asarray(eq_data["|B|_mn_B"]).reshape(
+        (eq_grid.num_rho, -1),
+    )[-1]
+
+    B_eq_valid = np.asarray(
+        eq_transforms["B"].basis.evaluate(nodes) @ B_mn
+    )
+
+    # Put B_eq back into a 2D (alpha, eta) array
+    B_eq_2d = np.zeros_like(mask_2d, dtype=float)
+    B_eq_2d[mask_2d] = B_eq_valid
+
+    # Target: B(eta) = < B_eq (eta, alpha)>_alpha, using only the valid points of the mask
+
+    mask_float = mask_2d.astype(float)
+
+    numerator = np.sum(B_eq_2d * mask_float, axis=0, keepdims=True)
+    denominator = np.sum(mask_float, axis=0, keepdims=True)
+    denominator = np.maximum(denominator, 1.0)
+
+    B_avg_eta = numerator / denominator
+
+    B_2d = np.ones_like(B_eq_2d) * B_avg_eta
+
+    # Wrap into Boozer fundamental cell
     if positive_zeta and N < 0:
         zeta_B = -zeta_B
         theta_B = 2.0 * np.pi - theta_B
 
-    # Wrap into Boozer fundamental cell
-
     zeta_B = np.mod(zeta_B, Lz)
     theta_B = np.mod(theta_B, 2.0 * np.pi)
-    B = np.asarray(B_valid)
+    B = np.asarray(B_2d[mask_2d])
 
     valid = (
         np.isfinite(zeta_B)
