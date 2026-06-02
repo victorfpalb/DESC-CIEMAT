@@ -5,6 +5,7 @@ from ._core import (
     OmnigenousField,
     OmnigenousFieldOOPS,
     OmnigenousFieldLCForm,
+    PiecewiseOmnigenousField, # new! 
     PoloidalMagneticField,
     ScalarPotentialField,
     ScaledMagneticField,

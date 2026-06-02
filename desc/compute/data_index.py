@@ -288,6 +288,8 @@ _class_inheritance = {
     "desc.magnetic_fields._core.OmnigenousField": [],
     "desc.magnetic_fields._core.OmnigenousFieldOOPS": [],
     "desc.magnetic_fields._core.OmnigenousFieldLCForm": [],
+    "desc.magnetic_fields._core.PiecewiseOmnigenousField": [], #New! For compute functions of pwO
+
 }
 data_index = {p: {} for p in _class_inheritance.keys()}
 all_kwargs = {p: {} for p in _class_inheritance.keys()}

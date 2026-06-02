@@ -1559,3 +1559,104 @@ def _pwO_mask_LCForm(params, transforms, profiles, data, **kwargs):
     data["pwO_mask_zeta_eff_2D"] = zeta_eff
 
     return data
+
+### Compute functions from DESC/vfp/pw1 branch 
+
+@register_compute_fun(
+    name="|B|_pwO",
+    label="|\\mathbf{B}_{pwO}|",
+    units="T",
+    units_long="Tesla",
+    description="Magnitude of piecewise omnigenous magnetic field",
+    dim=1,
+    params=["B_min", "B_max", "zeta_C", "theta_C", "t_1", "t_2"],
+    transforms={"grid": []},
+    profiles=[],
+    coordinates="rtz",
+    data=[],
+    parameterization="desc.magnetic_fields._core.PiecewiseOmnigenousField",
+)
+def _B_piecewise_omni(params, transforms, profiles, data, **kwargs):
+    iota0 = kwargs.get("iota", 0.6)  # This way we ensure iota0 = iota
+    theta_B = transforms["grid"].nodes[:, 1]
+    zeta_B = transforms["grid"].nodes[:, 2]
+    # NFP can't be a parameter. Must come from equilibrium
+    NFP = transforms["grid"].NFP
+
+    zeta_C = params["zeta_C"]
+    theta_C = params["theta_C"]
+    t_1 = params["t_1"]
+    t_2 = params["t_2"]
+    w_1 = jnp.pi / NFP * (1 - t_1 * t_2) / (1 + t_2 / iota0)
+    
+    # DISCLAIMER: This must give automatically w2 = pi. 
+    w_2 = jnp.pi**2 * (1- t_1 * t_2) / (
+        jnp.pi - (iota0 + t_2) * ((jnp.pi - NFP * w_1)  / (iota0 + 1/t_1) ) 
+    )
+    
+    B_min = params["B_min"]
+    B_max = params["B_max"]
+
+    p = kwargs.get("p", 3)
+    
+    exponent = -1 * (
+        ((zeta_B - zeta_C + t_1 * (theta_B - theta_C)) / w_1) ** (2 * p)
+        + ((theta_B - theta_C + t_2 * (zeta_B - zeta_C)) / w_2) ** (2 * p)
+    )
+
+    B_pwO = B_min + (B_max - B_min) * jnp.exp(exponent)
+
+    # Flattened array. Reshaping may cause jit-related issues
+    data["|B|_pwO"] = B_pwO
+
+    return data
+
+@register_compute_fun(
+    name="Q_pwO",
+    label="|\\Q_{pwO}|",
+    units="~",
+    units_long="None",
+    description="Self-overlap of the target field",
+    dim=1,
+    params=["t_1", "t_2"],
+    transforms={"grid": []},
+    profiles=[],
+    coordinates="rtz",
+    data=[],
+    parameterization="desc.magnetic_fields._core.PiecewiseOmnigenousField",
+)
+def _Q_piecewise_omni(params, transforms, profiles, data, **kwargs):
+    iota0 = kwargs.get("iota", 0.6) 
+    NFP = transforms["grid"].NFP
+
+    t_1 = params["t_1"]
+    t_2 = params["t_2"]
+    w_1 = jnp.pi / NFP * (1 - t_1 * t_2) / (1 + t_2 / iota0)
+
+    w_2 = jnp.pi**2 * (1- t_1 * t_2) / (
+        jnp.pi - (iota0 + t_2) * ((jnp.pi - NFP * w_1)  / (iota0 + 1/t_1) ) 
+    ) 
+
+    zeta_pp = (w_1 - t_1 * w_2) / (1 - t_1 * t_2)
+    zeta_pm = (w_1 + t_1 * w_2) / (1 - t_1 * t_2)
+    theta_pp = (w_2 - t_2 * w_1) / (1 - t_1 * t_2)
+    theta_pm = (-w_2 - t_2 * w_1) / (1 - t_1 * t_2)
+
+    Q = (
+        jnp.max(
+            jnp.stack(
+                [
+                    NFP * zeta_pp - jnp.pi,
+                    NFP * zeta_pm - jnp.pi,
+                    theta_pp - jnp.pi,
+                    -theta_pm - jnp.pi,
+                ],
+                axis=0,
+            )
+        )
+        / jnp.pi
+    )
+
+    data["Q_pwO"] = Q
+
+    return data
