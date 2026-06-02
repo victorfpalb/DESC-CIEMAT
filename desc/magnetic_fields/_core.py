@@ -3752,3 +3752,223 @@ class OmnigenousFieldLCForm(Optimizable, IOAble):
             and (int(helicity[1]) == helicity[1])
         )
         self._helicity = helicity
+
+### Definition of PiecewiseOmnigenousField
+
+class PiecewiseOmnigenousField(Optimizable, IOAble):
+    """A piecewise omnigenous magnetic field.
+
+    Uses the piecewise omnigenous parameterization from Velasco et al. [1].
+
+    Parameters
+    ----------
+    B_min : float, optional
+        Minimum magnetic field strength of the target piecewise omnigenous field.
+        This is an optimizable parameter.
+    B_max : float, optional
+        Maximum magnetic field strength of the target piecewise omnigenous field.
+        This is an optimizable parameter.
+    zeta_C : float, optional
+        Boozer toroidal coordinate of the center of the parallelogram.
+        This is an optimizable parameter.
+    theta_C : float
+        Boozer poloidal coordinate of the center of the parallelogram.
+        This is an optimizable parameter. 
+    t_1 : float
+        Tilt parameter t_1.
+        This is an optimizable parameter.
+    t_2 : float
+        Tilt parameter t_2.
+        This is an optimizable parameter.
+    NFP : int
+        Number of field periods. 
+    p : int
+        Exponent of the pwO field.
+
+    Notes
+    -----
+    Doesn't conform to the MagneticField API, as it only knows about
+    :math:`|B|` in computational/Boozer coordinates, not vector
+    :math:`\\mathbf{B}` in lab coordinates.
+
+    References
+    ----------
+    .. [1] Velasco, J. L., et al. "Piecewise Omnigenous stellarators",
+    Phys. Rev. Lett. 133, 185101.
+    """
+
+    _io_attrs_ = [
+        "_NFP",
+        "_B_min",
+        "_B_max",
+        "_zeta_C",
+        "_theta_C",
+        "_t_1",
+        "_t_2",
+        "_p", 
+    ]
+
+    def __init__(
+        self,
+        B_min=0.8,
+        B_max=1.2,
+        zeta_C=1.2 * jnp.pi,
+        theta_C=2 * jnp.pi,
+        t_1=0.2,
+        t_2=1.0,
+        NFP=1,
+        p=3, 
+    ):
+        self._NFP = NFP
+        self._B_min = B_min
+        self._B_max = B_max
+        self._zeta_C = zeta_C
+        self._theta_C = theta_C
+        self._t_1 = t_1
+        self._t_2 = t_2
+        self._p = p
+
+    def compute(
+        self,
+        names,
+        grid=None,
+        params=None,
+        transforms=None,
+        profiles=None,
+        data=None,
+        **kwargs,
+    ):
+        """Compute the quantity given by name on grid.
+
+        Parameters
+        ----------
+        names : str or array-like of str
+            Name(s) of the quantity(s) to compute.
+        grid : Grid, optional
+            Grid of coordinates to evaluate at. The grid nodes are given in the usual
+            (ρ,θ,ζ) coordinates, but θ is mapped to η and ζ is mapped to α.
+            Defaults to a linearly space grid on the rho=1 surface.
+        params : dict of ndarray
+            Parameters from the equilibrium, such as R_lmn, Z_lmn, i_l, p_l, etc
+            Defaults to attributes of self.
+        transforms : dict of Transform
+            Transforms for R, Z, lambda, etc. Default is to build from grid
+        profiles : dict of Profile
+            Profile objects for pressure, iota, current, etc. Defaults to attributes
+            of self
+        data : dict of ndarray
+            Data computed so far, generally output from other compute functions
+        **kwargs : dict, optional
+            Valid keyword arguments are:
+
+            * ``iota``: rotational transform
+            * ``helicity``: helicity (defaults to self.helicity)
+
+        Returns
+        -------
+        data : dict of ndarray
+            Computed quantity and intermediate variables.
+
+        """
+        if isinstance(names, str):
+            names = [names]
+        if grid is None:
+            grid = LinearGrid(theta=2 * 10, N=2 * 10, NFP=self.NFP, sym=False)
+        elif not isinstance(grid, _Grid):
+            raise TypeError(
+                "must pass in a Grid object for argument grid!"
+                f" instead got type {type(grid)}"
+            )
+
+        if params is None:
+            params = get_params(names, obj=self)
+        if transforms is None:
+            transforms = get_transforms(names, obj=self, grid=grid, **kwargs)
+        if data is None:
+            data = {}
+        profiles = {}
+
+        data = compute_fun(
+            self,
+            names,
+            params=params,
+            transforms=transforms,
+            profiles=profiles,
+            data=data,
+            **kwargs,
+        )
+        return data
+
+    @property
+    def NFP(self):
+        """int: Number of (toroidal) field periods."""
+        return self._NFP
+    
+    @property
+    def p(self):
+        """int: Exponent of the pwO parametrization."""
+        return self._p
+        
+    @p.setter
+    def p(self, p):
+        self._p = p
+
+    @optimizable_parameter
+    @property
+    def B_min(self):
+        """ndarray: Piecewise Omnigenity magnetic well shape parameters."""
+        return self._B_min
+
+    @B_min.setter
+    def B_min(self, B_min):
+        self._B_min = B_min
+
+    @optimizable_parameter
+    @property
+    def B_max(self):
+        """ndarray: Piecewise Omnigenity magnetic well shape parameters."""
+        return self._B_max
+
+    @B_max.setter
+    def B_max(self, B_max):
+        self._B_max = B_max
+
+    @optimizable_parameter
+    @property
+    def theta_C(self):
+        """ndarray: Piecewise Omnigenity shape parameter."""
+        return self._theta_C
+
+    @theta_C.setter
+    def theta_C(self, theta_C):
+        self._theta_C = theta_C
+
+    @optimizable_parameter
+    @property
+    def zeta_C(self):
+        """ndarray: Piecewise Omnigenity shape parameter."""
+        return self._zeta_C
+
+    @zeta_C.setter
+    def zeta_C(self, zeta_C):
+        self._zeta_C = zeta_C
+
+    @optimizable_parameter
+    @property
+    def t_1(self):
+        """ndarray: Piecewise Omnigenity shape parameter."""
+        return self._t_1
+
+    @t_1.setter
+    def t_1(self, t_1):
+        self._t_1 = t_1
+
+    @optimizable_parameter
+    @property
+    def t_2(self):
+        """ndarray: Piecewise Omnigenity shape parameter."""
+        return self._t_2
+
+    @t_2.setter
+    def t_2(self, t_2):
+        self._t_2 = t_2

@@ -52,6 +52,7 @@ from ._omnigenity import (
     Omnigenity,
     OmnigenityHarmonics,
     Omnigenity_pwO, 
+    PiecewiseOmnigenity, #new!
     QuasisymmetryBoozer,
     QuasisymmetryTripleProduct,
     QuasisymmetryTwoTerm,
