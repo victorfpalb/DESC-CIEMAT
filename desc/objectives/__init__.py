@@ -1,5 +1,6 @@
 """Classes defining objectives for equilibrium and optimization."""
 
+from ._turbulence import ITG_turbulence
 from ._bootstrap import BootstrapRedlConsistency
 from ._coils import (
     CoilArclengthVariance,
@@ -52,6 +53,7 @@ from ._omnigenity import (
     Omnigenity,
     OmnigenityHarmonics,
     Omnigenity_pwO, 
+    Omnigenity_pwO_extended,
     PiecewiseOmnigenity, #new!
     QuasisymmetryBoozer,
     QuasisymmetryTripleProduct,
