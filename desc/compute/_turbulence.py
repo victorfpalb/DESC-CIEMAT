@@ -4,7 +4,7 @@ from .data_index import register_compute_fun
 
 @register_compute_fun(
     name="f_ITG",
-    label="f_{\\mathrm{stab}}",
+    label="f_{\\mathrm{ITG}}",
     units="~",
     units_long="dimensionless",
     description="Local ITG turbulence proxy",
@@ -15,7 +15,7 @@ from .data_index import register_compute_fun
     data=["psi_r", "gbdrift", "g^rr", "|B|", "a"],
     coordinates="rtz",
 )
-def _f_stab(params, transforms, profiles, data, **kwargs):
+def _f_ITG(params, transforms, profiles, data, **kwargs):
     """Local ITG turbulence proxy.
 
     Smooth version for optimization:
@@ -24,8 +24,7 @@ def _f_stab(params, transforms, profiles, data, **kwargs):
 
     with:
 
-        Ky = - sign(psi_r) * (a/2) * gbdrift # I should be B**3 * gbdrift according to DESC definition, but because
-                                             # we just care of the magnitude, the sign for the Heaviside, this is fine. 
+        Ky = - sign(psi_r) * B**3 * gbdrift 
 
     and:
 
@@ -34,16 +33,18 @@ def _f_stab(params, transforms, profiles, data, **kwargs):
     For width -> 0, this tends to the hard Heaviside.
     """
 
-    Ky = - jnp.sign(data["psi_r"]) * (data["a"]/2) * data["gbdrift"]
-
+    Ky = - jnp.sign(data["psi_r"]) * (data["|B|"]**3) * data["gbdrift"] # Prueba con el B**3!
     data["K_y"] = Ky
 
+    # Definition of a 'smooth' heaviside with a tanh. 
     smooth_width = kwargs.get("smooth_width", 1e-3)
 
-    H = 0.5 * (
-        1.0 + jnp.tanh( Ky / jnp.maximum(smooth_width, 1e-12))
-    )
+    H = 0.5 * (1.0 + jnp.tanh( Ky / jnp.maximum(smooth_width, 1e-3)))
+    data["H"] = H
 
-    data["f_ITG"] = ((H + 0.4) * jnp.sqrt(data["g^rr"]) / jnp.sqrt(data["|B|"]))
+    # NEW!
+    # f_ITG = Heaviside(K_y) * |∇rho| / sqrt(|B|)
+    data["f_ITG"] = H * jnp.sqrt(data["g^rr"]) / jnp.sqrt(data["|B|"])
+
 
     return data

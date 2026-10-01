@@ -1388,7 +1388,7 @@ def _iota_eff_LCForm(M, N, iota, NFP):
     iota = jnp.atleast_1d(iota)
     iota0 = iota[-1]
     denom1 = jnp.where(iota0 == 0.0, 1.0, iota0)
-    val1 = 1.0 / denom1
+    val1 = NFP / denom1
     denom2 = jnp.where(
         (N - iota0 * M) == 0.0,
         1.0,
@@ -1474,10 +1474,12 @@ def _eta_crit_LCForm(params, transforms, profiles, data, **kwargs):
     D_func="function: Function to compute D(eta) given D_list",
     neta_pwO_mask="int: Number of eta points for the pwO mask. Default 64",
     nalpha_pwO_mask="int: Number of alpha points for the pwO mask. Default 128",
+    expand="Wether if the condition want to be expanded to the full domain or not. Default: False."
 )
 def _pwO_mask_LCForm(params, transforms, profiles, data, **kwargs):
     M, N = kwargs.get("helicity", (1, 0))
     iota = kwargs.get("iota", jnp.ones(transforms["grid"].num_rho))
+    expand = kwargs.get("expand", False) # False by default 
 
     S_list = jnp.asarray(params["S_list"])
     D_list = jnp.asarray(params["D_list"])
@@ -1501,8 +1503,12 @@ def _pwO_mask_LCForm(params, transforms, profiles, data, **kwargs):
     )
     iota_eff = jnp.ravel(iota_eff)[0]
 
-    eta_min = eta_crit # TODO: Mirar si esto puede fallar si eta_cr < 0 o > pi! 
-    eta_max = 2.0 * jnp.pi - eta_min
+    if expand: 
+        eta_min = 0
+        eta_max = 2.0 * jnp.pi
+    else:
+        eta_min = eta_crit 
+        eta_max = 2.0 * jnp.pi - eta_min
 
     eta_1d = jnp.linspace(eta_min, eta_max, neta)
     alpha_1d = jnp.linspace(
@@ -1542,7 +1548,18 @@ def _pwO_mask_LCForm(params, transforms, profiles, data, **kwargs):
         condition_value_raw[:, ::-1],
     )
 
-    mask_2d = condition_value >= 0
+    condition_mask = condition_value >= 0
+    # Corrección para no meter puntos fuera del dominio squeezed (eta_cr, 2pi - eta_cr)
+    if expand:
+        valid_eta_domain = ( # Dominio válido de eta
+            (eta_2d >= eta_crit)
+            & (eta_2d <= 2.0 * jnp.pi - eta_crit)
+        )
+        # Puntos que cumplan la condición y que estén dentro del dominio válido de eta
+        mask_2d = valid_eta_domain & condition_mask 
+    else:
+        # Máscara normal, sin tener que checkear el dominio de eta ya que ya es el bueno por defecto. 
+        mask_2d = condition_mask
 
     # Main output. This will be use for the Omnigenity_pwO objective function. 
     data["pwO_mask"] = jnp.ravel(mask_2d, order="F")

@@ -1805,10 +1805,11 @@ class Omnigenity_pwO(_Objective):
 
         eta_crit = jnp.ravel(field_data["eta_crit_LCForm"])[0]
 
-        # TODO: REVISAR ESTO. Esto ahora es un penalty enorme par que eta_cr no sea menor que cero. 
+        ### TODO: REVISAR ESTO. Esto ahora es un penalty enorme par que eta_cr no sea menor que cero. 
         eta_cr_penalty_weight = 1e6
         eta_cr_penalty = eta_cr_penalty_weight * jnp.maximum(0.0, -eta_crit) # Esto para eta_cr negativo
 
+        ### ---------------------------
         nalpha = field_grid.num_theta
         neta = field_grid.num_zeta
 
@@ -1899,6 +1900,500 @@ class Omnigenity_pwO(_Objective):
         residual = residual + eta_cr_penalty
 
         return residual.flatten(order="F")
+
+class Omnigenity_pwO_extended(_Objective):
+    """Extended pointwise pwO omnigenity objective.
+
+    Two definitions of the valid LC domain are available:
+
+    ``case="1"``
+        Uses the alpha-dependent boundaries ``eta_c(alpha)`` and
+        ``2*pi - eta_c(alpha)``.
+
+    ``case="2"``
+        Uses the constant boundaries ``eta_d`` and ``2*pi - eta_d``, with
+        ``eta_d = max_alpha eta_c(alpha)``, so that the retained LC interval
+        contains the full alpha domain.
+
+    In both cases, ``r1`` minimizes the variation of |B| with alpha in the
+    valid LC domain, while ``r2`` drives the corresponding invalid Boozer
+    region to the surface value ``Bmax``.
+
+
+    Parameters
+    ----------
+    eq : Equilibrium
+        DESC equilibrium.
+    field : OmnigenousFieldLCForm
+        LCForm omnigenous / pwO field.
+    case : {"1", "2"}, optional
+        Choice of valid-domain definition. Default is ``"1"``.
+    neta : int, optional
+        Number of eta points in the auxiliary LC objective grid.
+    nalpha : int, optional
+        Number of alpha points in the auxiliary LC objective grid.
+    nzeta_B : int, optional
+        Number of zeta_B points in the auxiliary Boozer grid used by r2.
+    """
+
+    _coordinates = "rtz"
+    _units = "(T)"
+    _print_value_fmt = "O-omnigenity error: "
+
+    _static_attrs = _Objective._static_attrs + [
+        "_eq_data_keys",
+        "_eq_fixed",
+        "_field_data_keys",
+        "_field_fixed",
+        "_helicity",
+        "neta",
+        "nalpha",
+        "nzeta_B",
+        "M_booz",
+        "N_booz",
+        "S_function",
+        "D_function",
+        "case",
+    ]
+
+    def __init__(
+        self,
+        eq,
+        field,
+        target=None,
+        bounds=None,
+        weight=1,
+        normalize=True,
+        normalize_target=True,
+        loss_function=None,
+        deriv_mode="auto",
+        eq_grid=None,
+        field_grid=None,
+        M_booz=None,
+        N_booz=None,
+        eta_weight=1,
+        neta=32,
+        nalpha=64,
+        nzeta_B=16,
+        case="1", # By default, case 1, corresponding to the full eta domain. 
+        eq_fixed=False,
+        field_fixed=False,
+        name="Omnigenity_pwO_extended",
+        jac_chunk_size=None,
+    ):
+        if target is None and bounds is None:
+            target = 0
+
+        if case not in ("1", "2"):
+            raise ValueError("case must be either '1' or '2'.")
+
+        self._eq = eq
+        self._field = field
+
+        self._eq_grid = eq_grid
+        self._field_grid = field_grid
+
+        self.M_booz = M_booz
+        self.N_booz = N_booz
+
+        self.eta_weight = eta_weight
+
+        self.neta = neta
+        self.nalpha = nalpha
+        self.nzeta_B = nzeta_B
+        self.case = case # Choose the case we want to study 
+
+        self.helicity = field.helicity
+        self._helicity = field.helicity
+
+        self.S_function = getattr(self._field, "_S_func")
+        self.D_function = getattr(self._field, "_D_func")
+
+        self._eq_fixed = eq_fixed
+        self._field_fixed = field_fixed
+
+        if not eq_fixed and not field_fixed:
+            things = [eq, field]
+        elif eq_fixed and not field_fixed:
+            things = [field]
+        elif field_fixed and not eq_fixed:
+            things = [eq]
+        else:
+            raise ValueError("Cannot fix both the eq and field.")
+
+        super().__init__(
+            things=things,
+            target=target,
+            bounds=bounds,
+            weight=weight,
+            normalize=normalize,
+            normalize_target=normalize_target,
+            loss_function=loss_function,
+            deriv_mode=deriv_mode,
+            name=name,
+            jac_chunk_size=jac_chunk_size,
+        )
+
+    def build(self, use_jit=True, verbose=1):
+        """Build objective."""
+
+        if self._eq_fixed:
+            eq = self._eq
+            field = self.things[0]
+        elif self._field_fixed:
+            eq = self.things[0]
+            field = self._field
+        else:
+            eq = self.things[0]
+            field = self.things[1]
+
+        M_booz = self.M_booz or 2 * eq.M
+        N_booz = self.N_booz or 2 * eq.N
+
+        # Grids
+        if self._field_grid is None:
+            field_grid = LinearGrid(
+                rho=1.0,
+                theta=np.linspace(0.0, 2.0 * jnp.pi, self.nalpha, endpoint=False),
+                zeta=np.linspace(0.0, 2.0 * jnp.pi / field.NFP, self.neta, endpoint=False),
+                NFP=field.NFP,
+                sym=False,
+            )
+        else:
+            field_grid = self._field_grid
+
+        if self._eq_grid is None:
+            rho = field_grid.nodes[field_grid.unique_rho_idx, 0]
+            eq_grid = LinearGrid(
+                rho=rho,
+                M=2 * M_booz,
+                N=2 * N_booz,
+                NFP=eq.NFP,
+                sym=False,
+            )
+        else:
+            eq_grid = self._eq_grid
+
+        errorif(eq_grid.sym, msg="eq_grid must have sym=False.")
+        errorif(field_grid.sym, msg="field_grid must have sym=False.")
+
+        errorif(
+            eq_grid.NFP != field_grid.NFP,
+            msg="eq_grid and field_grid must have the same NFP.",
+        )
+
+        errorif(
+            field_grid.num_rho != 1,
+            msg="Omnigenity_pwO currently assumes a single rho surface.",
+        )
+
+        self._eq_data_keys = ["|B|_mn_B", "iota",]
+        self._field_data_keys = ["S_list", "D_list", "eta_crit_LCForm",]
+
+        # Ahora mismo solo funciona para QI (por cálculo de theta_B y zeta_B), a cambiar en un futuro en el compute. 
+        M, N = self.helicity
+        errorif(
+            not (M == 0 and abs(N) == 1),
+            ValueError,
+            "Omnigenity_pwO is currently implemented only for QI helicity (M, N) = (0, ±1).",
+        )
+
+        if verbose > 0:
+            print("Precomputing transforms")
+
+        timer = Timer()
+        timer.start("Precomputing transforms")
+
+        eq_profiles = get_profiles(
+            self._eq_data_keys,
+            obj=eq,
+            grid=eq_grid,
+        )
+
+        eq_transforms = get_transforms(
+            self._eq_data_keys,
+            obj=eq,
+            grid=eq_grid,
+            M_booz=M_booz,
+            N_booz=N_booz,
+        )
+
+        field_transforms = get_transforms(
+            self._field_data_keys,
+            obj=field,
+            grid=field_grid,
+        )
+
+        # I define here the dimention of the residual to define the _weight in self._constants
+        self._dim_f = field_grid.num_nodes + field_grid.num_theta * self.nzeta_B # Dim(residual) = Dim(neta*nalpha) + Dim(nzeta_B*nalpha)
+ 
+        self._constants = {
+            # standard constant keys 
+            "profiles": {},
+            "transforms": field_transforms,
+            "quad_weights": jnp.ones(self._dim_f),
+            "eq_profiles": eq_profiles,
+            "eq_transforms": eq_transforms,
+            "field_transforms": field_transforms,
+            "helicity": self.helicity,
+        }
+
+        if self._eq_fixed:
+            eq_data = compute_fun(
+                "desc.equilibrium.equilibrium.Equilibrium",
+                self._eq_data_keys,
+                params=self._eq.params_dict,
+                transforms=self._constants["eq_transforms"],
+                profiles=self._constants["eq_profiles"],
+            )
+            self._constants["eq_data"] = eq_data
+
+        timer.stop("Precomputing transforms")
+
+        if verbose > 1:
+            timer.disp("Precomputing transforms")
+
+        if self._normalize:
+            scales = compute_scaling_factors(eq)
+            self._normalization = scales["B"]
+
+        super().build(use_jit=use_jit, verbose=verbose)
+
+    def compute(self, params_1=None, params_2=None, constants=None):
+        """Compute the pointwise pwO residual."""
+
+        if constants is None:
+            constants = self.constants
+
+        if self._eq_fixed:
+            field_params = params_1
+        elif self._field_fixed:
+            eq_params = params_1
+        else:
+            eq_params = params_1
+            field_params = params_2
+
+        eq_grid = constants["eq_transforms"]["grid"]
+        field_grid = constants["field_transforms"]["grid"]
+
+        # compute eq data
+        if self._eq_fixed:
+            eq_data = constants["eq_data"]
+        else:
+            eq_data = compute_fun("desc.equilibrium.equilibrium.Equilibrium", self._eq_data_keys, params=eq_params, transforms=constants["eq_transforms"], profiles=constants["eq_profiles"])
+
+        # LCForm mapping depends on the rotational transform.
+        iota = eq_data["iota"][eq_grid.unique_rho_idx]
+
+        # compute field data
+        if self._field_fixed:
+            field_params = self._field.params_dict
+
+        field_data = compute_fun("desc.magnetic_fields._core.OmnigenousFieldLCForm", self._field_data_keys, params=field_params, transforms=constants["field_transforms"], profiles={}, helicity=constants["helicity"], iota=iota, S_func=self.S_function, D_func=self.D_function)
+
+        # COMPUTE THE MASK OF VALID POINTS #
+        # needed to calculate _zeta_eff_LCForm_raw
+
+        S_list = field_data["S_list"]
+        D_list = field_data["D_list"]
+
+        eta_crit = jnp.ravel(field_data["eta_crit_LCForm"])[0]
+
+        ### TODO: REVISAR ESTO. Esto ahora es un penalty enorme par que eta_cr no sea menor que cero.
+        eta_cr_penalty_weight = 1e6
+        eta_cr_penalty = eta_cr_penalty_weight * jnp.maximum(0.0, -eta_crit) # Esto para eta_cr negativo
+
+        eta_cr_pi_margin = 0.1 
+        eta_cr_pi_penalty_weight = 1e6
+        eta_cr_pi_penalty = eta_cr_pi_penalty_weight * jnp.maximum(0.0, eta_crit - (jnp.pi - eta_cr_pi_margin))
+        ### --------------------
+
+        nalpha = field_grid.num_theta
+        neta = field_grid.num_zeta
+
+        # Create the real grid in (eta, alpha) coordinates of the residual
+        eta_1d = jnp.linspace(eta_crit, 2.0 * jnp.pi - eta_crit, neta)
+        alpha_1d = jnp.linspace(0.0, 2.0 * jnp.pi, nalpha, endpoint=False)
+
+        eta_2d, alpha_2d = jnp.meshgrid(eta_1d, alpha_1d, indexing="xy")
+
+        # Calculate the condition of valid points
+
+        M, N = constants["helicity"]
+
+        iota_eff = _iota_eff_LCForm(M, N, iota, field_grid.NFP)
+        iota_eff = jnp.ravel(iota_eff)[0]
+
+        zeta_eff = _zeta_LCForm_raw(eta_2d, alpha_2d, iota_eff, S_list, D_list, self.S_function, self.D_function)
+
+        zeta_eff_mirror = zeta_eff[:, ::-1] # eta -> 2pi - eta. Valid because eta_1d is symmetric around pi.
+
+        condition_value_raw = zeta_eff - zeta_eff_mirror + 2.0 * jnp.pi
+
+        condition_value = jnp.where(eta_2d <= jnp.pi, condition_value_raw, condition_value_raw[:, ::-1]) # To separate different branches
+
+        # retrieve first half of condition 'C' function (eta_cr < eta < 2pi)
+
+        nlower = (neta + 1) // 2
+        eta_lower_1d = eta_1d[:nlower]
+        C_lower = condition_value_raw[:, :nlower]
+
+        # Ensure eta raches pi
+        if neta % 2 == 0:
+            eta_lower_1d = jnp.concatenate((eta_lower_1d, jnp.array([jnp.pi])))
+            C_pi = 2.0 * jnp.pi * jnp.ones((nalpha, 1), dtype=C_lower.dtype)
+            C_lower = jnp.concatenate((C_lower, C_pi), axis=1)
+
+        # Scanning first eta_valid for each alpha!
+
+        valid_lower = C_lower >= 0.0
+        has_valid = jnp.any(valid_lower, axis=1)
+        idx_right = jnp.argmax(valid_lower, axis=1) # valid
+        idx_left = jnp.maximum(idx_right - 1, 0) # not valid
+        rows = jnp.arange(nalpha)
+
+        # points to both sides of the domain: boundary between valid and non-valid
+
+        eta_left = eta_lower_1d[idx_left]
+        eta_right = eta_lower_1d[idx_right]
+        C_left = C_lower[rows, idx_left]
+        C_right = C_lower[rows, idx_right]
+
+        # lineal interpolation to get eta_c: eta_c = eta_left - C_left * (eta_right - eta_left) / (C_right - C_left)
+
+        denominator_root = C_right - C_left
+        denominator_root = jnp.where(jnp.abs(denominator_root) > 1e-14, denominator_root, 1.0)
+        eta_root = eta_left - C_left * (eta_right - eta_left) / denominator_root
+
+        # Now, we can define the curve of eta_c(alpha) and 2pi - eta_c(alpha)
+
+        already_valid = idx_right == 0
+        eta_c = jnp.where(already_valid, eta_crit, eta_root)
+        eta_c = jnp.where(has_valid, eta_c, jnp.pi)
+
+        # CASE SELECTION: "1" or "2"
+
+        if self.case == "1":
+            # Original effective boundary eta_c(alpha).
+            eta_boundary_lower = eta_c
+
+            # r1 mask: original alpha-dependent valid LC domain.
+            mask = (condition_value >= 0.0).astype(zeta_eff.dtype)
+
+        elif self.case == "2":
+            # Constant boundary retaining the full alpha domain.
+            eta_d = jnp.max(eta_c)
+            eta_boundary_lower = jnp.full_like(eta_c, eta_d)
+
+            # r1 mask: eta_d <= eta <= 2*pi-eta_d for every alpha.
+            eta_fold = jnp.minimum(eta_2d, 2.0 * jnp.pi - eta_2d)
+            mask = (eta_fold >= eta_d).astype(zeta_eff.dtype)
+
+        else:
+            raise ValueError("case must be '1' or '2'.")
+
+        eta_boundary_upper = 2.0 * jnp.pi - eta_boundary_lower
+
+        # TODO: CAMBIAR ESTO PARA OTRAS HELICIDADES Y NO SOLO PARA QI
+
+        theta_B = alpha_2d
+        zeta_B = zeta_eff / (field_grid.NFP * N)
+
+        theta_B = jnp.ravel(theta_B, order="F")
+        zeta_B = jnp.ravel(zeta_B, order="F")
+
+        # Evaluate B_eq(theta_B, zeta_B) #
+
+        def _compute_B_eta_alpha(theta_B, zeta_B, B_mn):
+            nodes = jnp.vstack((jnp.zeros_like(theta_B), theta_B, zeta_B)).T
+            B_eta_alpha = jnp.matmul(constants["eq_transforms"]["B"].basis.evaluate(nodes), B_mn)
+            return B_eta_alpha
+
+        theta_B = theta_B.reshape((1, -1))
+        zeta_B = zeta_B.reshape((1, -1))
+
+        B_mn = eq_data["|B|_mn_B"].reshape((eq_grid.num_rho, -1))
+
+        B_eta_alpha = vmap(_compute_B_eta_alpha)(theta_B, zeta_B, B_mn)
+
+        # B_eq(eta, alpha) in 2D, for the surface to optimize.
+        B2 = B_eta_alpha[-1].reshape((field_grid.num_theta, field_grid.num_zeta), order="F")
+
+        ### RESIDUAL r1: points valid in LC mask!
+
+        numerator = jnp.sum(B2 * mask, axis=0, keepdims=True)
+        denominator = jnp.sum(mask, axis=0, keepdims=True)
+
+        denominator = jnp.maximum(denominator, 1.0) # avoid division by zero
+
+        B_avg_alpha = numerator / denominator
+
+        residual_r1 = (B2 - B_avg_alpha) * mask
+        residual_r1 = residual_r1.flatten(order="F")
+
+        ### RESIDUAL r2: points outside valid LC mask: minimizing variations <|B|> in Boozer coords.
+
+        # Transform of both limits to boozer
+
+        zeta_eff_c1 = _zeta_LCForm_raw(eta_boundary_lower, alpha_1d, iota_eff, S_list, D_list, self.S_function, self.D_function) # zeta_c,1
+        zeta_eff_c2 = _zeta_LCForm_raw(eta_boundary_upper, alpha_1d, iota_eff, S_list, D_list, self.S_function, self.D_function) # zeta_c,2
+
+        Lzeta = 2.0 * jnp.pi / field_grid.NFP # L_zeta to ensure periodicity of angles
+
+        zeta_c1 = jnp.mod(zeta_eff_c1 / (field_grid.NFP * N), Lzeta)
+        zeta_c2 = jnp.mod(zeta_eff_c2 / (field_grid.NFP * N), Lzeta)
+
+        # Regular Boozer grid for residual r2
+
+        ntheta_B = nalpha
+        nzeta_B = self.nzeta_B
+
+        theta_B_1d = alpha_1d
+        zeta_B_1d = jnp.linspace(0.0, Lzeta, nzeta_B, endpoint=False)
+
+        zeta_B_2d, theta_B_2d = jnp.meshgrid(zeta_B_1d, theta_B_1d, indexing="xy")
+
+        # Distances between curves (delta12) and points of the regular grid (delta)
+
+        delta12 = (zeta_c2 - zeta_c1 + Lzeta / 2.0) % Lzeta - Lzeta / 2.0
+        delta = (zeta_B_2d - zeta_c1[:, None] + Lzeta / 2.0) % Lzeta - Lzeta / 2.0
+
+        # Mask with no valid points
+
+        case_positive = (delta12[:, None] >= 0.0) & (delta >= 0.0) & (delta <= delta12[:, None])
+        case_negative = (delta12[:, None] < 0.0) & (delta <= 0.0) & (delta >= delta12[:, None])
+
+        invalid_Boozer = case_positive | case_negative
+        mask_invalid_Boozer = invalid_Boozer.astype(zeta_eff.dtype)
+
+        # Evaluate B_eq on this Boozer grid
+
+        theta_B_flat = jnp.ravel(theta_B_2d, order="F")
+        zeta_B_flat = jnp.ravel(zeta_B_2d, order="F")
+
+        theta_B_flat = theta_B_flat.reshape((1, -1))
+        zeta_B_flat = zeta_B_flat.reshape((1, -1))
+
+        B_Boozer_flat = vmap(_compute_B_eta_alpha)(theta_B_flat, zeta_B_flat, B_mn)
+
+        B_Boozer = B_Boozer_flat[-1].reshape((ntheta_B, nzeta_B), order="F")
+
+        # Bmax in Boozer coordinates
+
+        B_max = jnp.max(B_Boozer)
+
+        # residual r2
+
+        residual_r2 = (B_Boozer - B_max) * mask_invalid_Boozer
+        residual_r2 = residual_r2.flatten(order="F")
+
+        ### Concatenate residuals
+
+        residual = jnp.concatenate((residual_r1, residual_r2))
+        residual = residual + eta_cr_penalty + eta_cr_pi_penalty
+
+        return residual.flatten(order="F")
+
     
 ### New: Objective to approach Piecewise Omnigenity!
 

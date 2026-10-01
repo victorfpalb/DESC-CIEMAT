@@ -12,7 +12,7 @@ from desc.integrals import surface_averages
 class ITG_turbulence(_Objective):
     r"""Proxy to reduce ITG turbulence. Based on eq. (5.2) of Landreman et al (2025), JPP doi:10.1017/S0022377825100536. 
     
-    f_stab = mean( [ H(gbdrift) + 0.4 ] |nabla rho| / sqrt(B))
+    f_ITG = mean( [ H(Ky) + 0.4 ] |nabla rho| / sqrt(B))
 
     where H is the  heaviside funtion (1 for regions of bad curvature, 0 otherwise). 
 
@@ -26,7 +26,7 @@ class ITG_turbulence(_Objective):
     _equilibrium = True
     _coordinates = "rtz"
     _units = "~"
-    _print_value_fmt = "f_stab: "
+    _print_value_fmt = "f_ITG: "
 
     _static_attrs = tuple(_Objective._static_attrs) + ("_grid", "_average")
     def __init__(
@@ -40,7 +40,7 @@ class ITG_turbulence(_Objective):
         loss_function=None,
         deriv_mode="auto",
         grid=None,
-        name="f_stab",
+        name="f_ITG",
         jac_chunk_size=None,
         average=True,
     ):
@@ -68,7 +68,7 @@ class ITG_turbulence(_Objective):
 
         if self._grid is None:
             grid = LinearGrid(
-                rho=jnp.sqrt(jnp.array([0.5, 0.7])),
+                rho=jnp.sqrt(jnp.array([0.25, 0.5])),
                 M=eq.M_grid,
                 N=eq.N_grid,
                 NFP=eq.NFP,
@@ -91,6 +91,7 @@ class ITG_turbulence(_Objective):
             self._dim_f = grid.num_nodes
             self._data_keys = [
                 "f_ITG",
+                "sqrt(g)"
             ]
 
         timer = Timer()
@@ -121,6 +122,7 @@ class ITG_turbulence(_Objective):
     def compute(self, params, constants=None):
         """Compute quantity to be minimized."""
 
+        # fix this? 
         if constants is None:
             constants = self._constants
 
@@ -138,9 +140,9 @@ class ITG_turbulence(_Objective):
                 data["f_ITG"],
                 sqrt_g=data["sqrt(g)"],
                 surface_label="rho",
-                expand_out=False,
+                expand_out=False, # maybe this should be True? 
             )
-        else:
+        else: 
             residual = data["f_ITG"]
 
         return residual
