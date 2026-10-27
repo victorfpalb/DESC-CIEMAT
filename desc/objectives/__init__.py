@@ -1,8 +1,6 @@
 """Classes defining objectives for equilibrium and optimization."""
 
 from ._turbulence import (
-    ITG_turbulence, 
-    BadCurvatureArea, 
     F_turb, 
 )
 from ._bootstrap import BootstrapRedlConsistency
