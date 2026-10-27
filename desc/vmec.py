@@ -53,10 +53,11 @@ class VMECIO:
         boundary is loaded and the DESC Equilibrium R,Z are constrained to
         match the given VMEC boundary.
 
-        NOTE: This is only a fit, so the DESC Equilibrium returned is not
-        expected to be in force balance. It is recommended to solve the
-        Equilibrium once loaded before using the Equilibrium for any
-        analysis.
+        NOTE: This is only a fit of the VMEC R, Z and lambda, so the DESC
+        Equilibrium returned is not expected to be in force balance. It is
+        recommended to solve the Equilibrium once loaded before using the
+        Equilibrium for any analysis or computing any derived quantities in
+        DESC (e.g. anything that is not just R, Z or lambda).
 
         Parameters
         ----------
@@ -191,8 +192,12 @@ class VMECIO:
         eq.Z_lmn = fourier_to_zernike(m, n, Z_mn, eq.Z_basis)
 
         # lambda
+        # VMEC stores lambda on the half mesh, s_j = (j - 1/2) / (ns - 1),
+        # and the first row (axis) is unused
         m, n, L_mn = ptolemy_identity_fwd(xm, xn, s=lmns, c=lmnc)
-        eq.L_lmn = fourier_to_zernike(m, n, L_mn, eq.L_basis)
+        ns = L_mn.shape[0]
+        r_half = np.sqrt((np.arange(1, ns) - 0.5) / (ns - 1))
+        eq.L_lmn = fourier_to_zernike(m, n, L_mn[1:], eq.L_basis, rho=r_half)
 
         # apply boundary conditions
         constraints = get_fixed_axis_constraints(
@@ -734,7 +739,7 @@ class VMECIO:
         jcuru[0] = 0
 
         jcurv = file.createVariable("jcurv", np.float64, ("radius",))
-        jcuru.long_name = "flux surface average of sqrt(g)*J^zeta, on full mesh"
+        jcurv.long_name = "flux surface average of sqrt(g)*J^zeta, on full mesh"
         jcurv.units = "A/m^3"
         jcurv[:] = surface_averages(
             grid_full,
@@ -1331,7 +1336,7 @@ class VMECIO:
         # TODO (#1379): evaluate current at rho=0 nodes instead of extrapolation
         if not eq.sym:
             currvmns[:, :] = -s
-            currumns[0, :] = -(
+            currvmns[0, :] = -(
                 s[1, :] - (s[2, :] - s[1, :]) / (s_full[2] - s_full[1]) * s_full[1]
             )
         timer.stop("J^zeta*sqrt(g)")
